@@ -25,22 +25,7 @@ export const commands = [
   { command: "update", description: "Update the application and OpenCode" },
   { command: "help", description: "Show commands and usage" },
 ]
-const help = `**OpenCode Agent**
-Send text or an image. Add a caption to ask about the image. New messages give instructions to the task in progress.
-
-/new [title] - create a session
-/sessions - select a previous bot session
-/stop - stop work in the selected session
-/status - show the session, model, and directory
-/model [search] - select a model and variant
-/agent - select an agent
-/update - update the application and OpenCode
-/help - show this message
-
-Images: PNG, JPEG, GIF, or WebP, up to 20 MiB each. Use a model with image input.
-To answer a question, reply with text or use its buttons.
-
-This is an unofficial community project. It is not affiliated with the OpenCode team.`
+const help = `**OpenCode Agent**\nSend text or an image. Add a caption to ask about the image. New messages give instructions to the task in progress.\n\n/new [title] - create a session\n/sessions - select a previous bot session\n/stop - stop work in the selected session\n/status - show the session, model, and directory\n/model [search] - select a model and variant\n/agent - select an agent\n/update - update the application and OpenCode\n/help - show this message\n\nImages: PNG, JPEG, GIF, or WebP, up to 20 MiB each. Use a model with image input.\nTo answer a question, reply with text or use its buttons.\n\nThis is an unofficial community project. It is not affiliated with the OpenCode team.`
 
 export function authorized(update: Update, ownerID: number): boolean {
   const message = update.message ?? update.callback_query?.message
@@ -126,11 +111,9 @@ export class Gateway {
       return
     }
     const message = update.message!
+    const respond = (text: string) => this.telegram.send(text, undefined, `update:${update.update_id}`)
     const hasImage = !!message.photo?.length || !!message.document
-    if (!message.text && !hasImage) {
-      await this.telegram.send("Send text or a PNG, JPEG, GIF, or WebP image.", undefined, `update:${update.update_id}`)
-      return
-    }
+    if (!message.text && !hasImage) return respond("Send text or a PNG, JPEG, GIF, or WebP image.")
     const text = message.text ?? message.caption ?? "Analyze the attached image."
     const command = message.text && /^\/(\w+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(message.text)
     if (command) {
@@ -139,24 +122,23 @@ export class Gateway {
       if (name === "update") {
         const key = `update-job:${update.update_id}`
         if (this.store.get(key)) return
-        const id = await this.telegram.send("Starting update.", undefined, `update:${update.update_id}`)
+        const id = await respond("Starting update.")
         try { this.store.set(key, await this.requestUpdate(id)) }
         catch (error) { await this.telegram.edit(id, errorText(error, [this.config.token])) }
         return
       }
-      if (name === "start" || name === "help") { await this.telegram.send(help, undefined, `update:${update.update_id}`); return }
+      if (name === "start" || name === "help") return respond(help)
       if (name === "new") {
         await this.newSession(update.update_id, arg)
-        await this.telegram.send("New session.", undefined, `update:${update.update_id}`)
-        return
+        return respond("New session.")
       }
       const sessionID = await this.active(update.update_id)
-      if (name === "sessions") { await this.sessionMenu(0); return }
-      if (name === "model") { await this.modelMenu(sessionID, arg, 0); return }
-      if (name === "agent") { await this.agentMenu(sessionID); return }
+      if (name === "sessions") return this.sessionMenu(0)
+      if (name === "model") return this.modelMenu(sessionID, arg, 0)
+      if (name === "agent") return this.agentMenu(sessionID)
       if (name === "stop") {
         await this.client.session.interrupt({ sessionID, resume: false })
-        await this.telegram.send("Interrupted the active session.", undefined, `update:${update.update_id}`)
+        await respond("Interrupted the active session.")
         this.dirty = true
         return
       }
@@ -164,17 +146,12 @@ export class Gateway {
         const session = await this.client.session.get({ sessionID })
         const active = await this.client.session.active()
         const model = session.model ?? (await this.client.model.default({ location: session.location })).data
-        await this.telegram.send(`${active[sessionID] ? "Working" : "Idle"}\nModel: ${model ? modelLabel(model) : "Unavailable"}\nAgent: ${session.agent ?? "OpenCode default"}\nDirectory: ${session.location.directory}`, undefined, `update:${update.update_id}`)
-        return
+        return respond(`${active[sessionID] ? "Working" : "Idle"}\nModel: ${model ? modelLabel(model) : "Unavailable"}\nAgent: ${session.agent ?? "OpenCode default"}\nDirectory: ${session.location.directory}`)
       }
-      await this.telegram.send("Unknown command. Use /help.", undefined, `update:${update.update_id}`)
-      return
+      return respond("Unknown command. Use /help.")
     }
     const reply = message.reply_to_message && this.store.get<Action>(`form-reply:${message.reply_to_message.message_id}`)
-    if (reply && hasImage) {
-      await this.telegram.send("Reply with text to answer this question. Send the image as a separate message.", undefined, `update:${update.update_id}`)
-      return
-    }
+    if (reply && hasImage) return respond("Reply with text to answer this question. Send the image as a separate message.")
     if (reply) { await this.forms.act({ ...reply, kind: "form-value" }, text); this.dirty = true; return }
     // Remember routing before admission, so a redelivered Telegram update cannot target a newly selected session.
     const route = `input:${update.update_id}`

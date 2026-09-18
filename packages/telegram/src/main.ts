@@ -15,19 +15,7 @@ process.umask(0o077)
 async function main(args: string[]) {
   const [command, subcommand, ...rest] = args
   if (command === "--help" || command === "help") {
-    console.log(`OpenCode Agent (unofficial)
-
-  opencode-agent                    Open the separate OpenCode terminal interface
-  opencode-agent setup              Configure OpenCode and Telegram
-  opencode-agent update             Update the application and OpenCode
-  opencode-agent opencode <args>     Run a command in the separate V2 installation
-  opencode-agent gateway run         Run Telegram in the terminal
-  opencode-agent gateway install     Install and start the systemd user service
-  opencode-agent gateway start|stop|restart|status
-  opencode-agent gateway logs        Show gateway logs
-  opencode-agent doctor              Check OpenCode and Telegram
-
-Installation directory: ${agentHome()}`)
+    console.log(`OpenCode Agent (unofficial)\n\n  opencode-agent                    Open the separate OpenCode terminal interface\n  opencode-agent setup              Configure OpenCode and Telegram\n  opencode-agent update             Update the application and OpenCode\n  opencode-agent opencode <args>     Run a command in the separate V2 installation\n  opencode-agent gateway run         Run Telegram in the terminal\n  opencode-agent gateway install     Install and start the systemd user service\n  opencode-agent gateway start|stop|restart|status\n  opencode-agent gateway logs        Show gateway logs\n  opencode-agent doctor              Check OpenCode and Telegram\n\nInstallation directory: ${agentHome()}`)
     return
   }
   if (command === "setup") return setup()

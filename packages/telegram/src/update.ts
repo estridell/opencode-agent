@@ -345,5 +345,5 @@ export async function runUpdate(id: string, messageID?: number) {
 
 export async function markGatewayReady(version: string) {
   const state = { time: Date.now(), pid: process.pid, version, source: await realpath(sourceRoot()) }
-  await writeAtomic(join(agentHome(), "gateway-ready.json"), JSON.stringify(state))
+  await writeFile(join(agentHome(), "gateway-ready.json"), JSON.stringify(state), { mode: 0o600 })
 }

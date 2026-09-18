@@ -21,26 +21,7 @@ export function serviceUnit(bun: string, cli: string, home: string, path: string
   }
   // WorkingDirectory accepts one path, not a quoted argument list like ExecStart.
   const directory = home.replaceAll("%", "%%")
-  return `[Unit]
-Description=OpenCode Agent Telegram gateway
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${directory}
-ExecStart=${systemdQuote(bun)} ${systemdQuote(cli)} gateway run
-Environment=${systemdQuote(`OPENCODE_AGENT_HOME=${home}`)}
-Environment=${systemdQuote(`PATH=${path}`)}
-Restart=on-failure
-RestartSec=5
-TimeoutStopSec=15
-UMask=0077
-KillMode=process
-
-[Install]
-WantedBy=default.target
-`
+  return `[Unit]\nDescription=OpenCode Agent Telegram gateway\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${directory}\nExecStart=${systemdQuote(bun)} ${systemdQuote(cli)} gateway run\nEnvironment=${systemdQuote(`OPENCODE_AGENT_HOME=${home}`)}\nEnvironment=${systemdQuote(`PATH=${path}`)}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=15\nUMask=0077\nKillMode=process\n\n[Install]\nWantedBy=default.target\n`
 }
 
 export async function verifyService(file: string) {

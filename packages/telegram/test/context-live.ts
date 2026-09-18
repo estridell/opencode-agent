@@ -103,16 +103,6 @@ try {
   while (Object.hasOwn(await client.session.active(), parent.id) && Date.now() < finishing) await sleep(50)
   assert.ok(!Object.hasOwn(await client.session.active(), parent.id), "The active request must finish after plugin reload.")
   // Watcher notification and the upstream 100 ms debounce are asynchronous.
-  const deadline = Date.now() + 10_000
-  for (;;) {
-    try { await check(parent.id, true, "Do not settle for a partial", revised); break }
-    catch (error) { if (!(error instanceof assert.AssertionError) || Date.now() >= deadline) throw error }
-    await sleep(100)
-  }
-  client = await connect()
-  const after = await Bun.file(registrationFile()).json()
-  assert.equal(before.pid, after.pid)
-  await check(parent.id, true, "Do not settle for a partial", revised)
   const eventually = async (note: string, present: boolean) => {
     const deadline = Date.now() + 10_000
     for (;;) {
@@ -121,6 +111,11 @@ try {
       await sleep(100)
     }
   }
+  await eventually(revised, true)
+  client = await connect()
+  const after = await Bun.file(registrationFile()).json()
+  assert.equal(before.pid, after.pid)
+  await check(parent.id, true, "Do not settle for a partial", revised)
   // A second plugin has its own package entrypoint, relative import, and data file.
   const extra = join(stage, "packages/plugins/research")
   await mkdir(extra, { recursive: true })
