@@ -8,6 +8,20 @@ export type Choice = { text: string; action: Action }
 export class Pickers {
   constructor(readonly store: Store, readonly telegram: Telegram) {}
 
+  async page(title: string, choices: Choice[], navigation: Action, pickerID?: string, empty?: string) {
+    const size = 8
+    const pages = Math.max(1, Math.ceil(choices.length / size))
+    const page = Math.max(0, Math.min(navigation.page ?? 0, pages - 1))
+    const rows: Choice[][] = choices.slice(page * size, (page + 1) * size)
+      .map(choice => [{ ...choice, action: { ...choice.action, page } }])
+    const nav: Choice[] = []
+    if (page) nav.push({ text: "Previous", action: { ...navigation, page: page - 1 } })
+    if (page + 1 < pages) nav.push({ text: "Next", action: { ...navigation, page: page + 1 } })
+    if (nav.length) rows.push(nav)
+    rows.push([{ text: "Cancel", action: { kind: "cancel", sessionID: navigation.sessionID } }])
+    return this.show(!choices.length && empty ? empty : `${title} · ${page + 1}/${pages}`, rows, pickerID)
+  }
+
   current(action: Action, messageID?: number): boolean {
     if (!action.pickerID) return false
     const state = this.store.get<PickerState>(`picker:${action.pickerID}`)

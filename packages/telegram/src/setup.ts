@@ -1,7 +1,7 @@
 import { ask, confirm } from "./prompts"
 import { Api } from "grammy"
 import { mkdir, access } from "node:fs/promises"
-import { isAbsolute, join, resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { homedir } from "node:os"
 import { agentHome, configPath, errorText, loadConfig, saveConfig, type Config } from "./config"
 import { installRuntime, prepareRuntime, runOpenCode, upstreamBinary, workspace } from "./runtime"
@@ -18,7 +18,6 @@ export async function setup() {
   let existing: Config | undefined
   try { existing = await loadConfig() } catch (error) {
     // An existing malformed config should be fixed, not silently replaced.
-    try { await access(configPath()) } catch { /* First install. */ }
     if (await Bun.file(configPath()).exists()) throw error
   }
   if (await confirm("Sign in to a model provider now?", !existing)) {
@@ -44,7 +43,6 @@ export async function setup() {
   console.log(`The bot accepts messages only from user ID ${ownerID}.`)
   const rawDirectory = await ask("Working directory", { defaultValue: existing?.directory ?? workspace() })
   const directory = resolve(rawDirectory.startsWith("~/") ? join(homedir(), rawDirectory.slice(2)) : rawDirectory)
-  if (!isAbsolute(directory)) throw new Error("Directory must be absolute.")
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const store = new Store(join(agentHome(), "telegram.sqlite"))
   try {

@@ -314,6 +314,25 @@ test("No changes only the current model; completed buttons cannot change it agai
   expect(f.sessions.get(next)!.model).toEqual(initial.model)
 })
 
+test("model navigation preserves the search and bounds after selection and back", async () => {
+  const f = fixture()
+  const sessionID = await f.gateway.newSession(1)
+  await f.gateway.modelMenu(sessionID, "model-1", 99)
+  expect(picker(f).text).toBe("Models · 2/2")
+  await press(f, "provider/model-17")
+  await press(f, "Back")
+  expect(picker(f).text).toBe("Models · 2/2")
+  await press(f, "Previous")
+  expect(picker(f).text).toBe("Models · 1/2")
+  expect(picker(f).buttons.filter(b => b.text.startsWith("provider/")).map(b => b.text))
+    .toEqual(["provider/model-1", ...Array.from({ length: 7 }, (_, i) => `provider/model-${i + 10}`)])
+  await f.gateway.handle(message(2, "/model unavailable"))
+  expect(picker(f).text).toContain("No models found.")
+  expect(picker(f).buttons.map(b => b.text)).toEqual(["Cancel"])
+  await press(f, "Cancel")
+  expect(picker(f).buttons).toHaveLength(0)
+})
+
 test("cancelled and unavailable selections do not change the current model or default", async () => {
   const f = fixture()
   await f.gateway.handle(message(1, "/model"))
@@ -402,6 +421,41 @@ test("gateway startup does not require an existing owner chat", async () => {
   expect(f.telegram.find(t => t.method === "setMyCommands")!.payload.scope).toEqual({ type: "all_private_chats" })
   await f.gateway.handle(message(1, "Do work", 7))
   expect(f.calls).toHaveLength(0)
+})
+
+test("polling waits for each admission before advancing the offset or handling the next input", async () => {
+  const f = fixture()
+  const controller = new AbortController()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const prompt = f.gateway.client.session.prompt.bind(f.gateway.client.session)
+  const admitted: string[] = []
+  f.gateway.client.session.prompt = async input => {
+    admitted.push(input.text!)
+    if (admitted.length === 1) { entered.resolve(); await release.promise }
+    return prompt(input)
+  }
+  f.gateway.client.event.subscribe = async function* () {}
+  let polls = 0
+  f.gateway.api.getUpdates = async () => {
+    if (polls++ === 0) return [message(1, "First"), message(2, "Second")]
+    controller.abort()
+    return []
+  }
+  const running = f.gateway.run(controller.signal)
+  try {
+    await entered.promise
+    expect(admitted).toEqual(["First"])
+    expect(f.store.get("offset")).toBeUndefined()
+    release.resolve()
+    await running
+    expect(admitted).toEqual(["First", "Second"])
+    expect(f.store.get<number>("offset")).toBe(3)
+  } finally {
+    release.resolve()
+    controller.abort()
+    await running
+  }
 })
 
 test("admission retries retain their session and message IDs after an ambiguous failure", async () => {
@@ -500,6 +554,7 @@ test("structured questions survive gateway reconstruction and submit a complete 
   const f = fixture()
   const id = await f.gateway.newSession(1)
   const form: FormInfo = { id: "frm_test", sessionID: id, title: "Plan", fields: [
+    { key: "source", type: "string", hidden: true, default: "telegram" },
     { key: "mode", type: "string", required: true, options: [{ label: "Build", value: "build" }, { label: "Review", value: "review" }] },
     { key: "count", type: "integer", required: true, minimum: 1, when: [{ key: "mode", op: "eq", value: "build" }] },
   ] }
@@ -508,7 +563,32 @@ test("structured questions survive gateway reconstruction and submit a complete 
   await f.gateway.forms.act({ kind: "form-value", sessionID: id, id: form.id, field: "mode", value: "build" })
   const restored = new Gateway(f.gateway.config, f.store, f.gateway.client, f.gateway.api, 0)
   await restored.forms.act({ kind: "form-value", sessionID: id, id: form.id, field: "count" }, "3")
-  expect(f.calls.find(c => c.path.endsWith("/form/frm_test/reply"))!.body).toEqual({ answer: { mode: "build", count: 3 } })
+  expect(f.calls.find(c => c.path.endsWith("/form/frm_test/reply"))!.body).toEqual({ answer: { source: "telegram", mode: "build", count: 3 } })
+})
+
+test("form reconciliation waits for an in-flight answer before reading pending forms", async () => {
+  const f = fixture()
+  const sessionID = await f.gateway.newSession(1)
+  f.forms.set(sessionID, [{ id: "frm_test", sessionID, title: "Question", fields: [{ key: "answer", type: "string", required: true }] }])
+  await f.gateway.reconcile()
+  const questionCount = f.telegram.filter(t => t.method === "sendMessage").length
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const reply = f.gateway.client.session.form.reply.bind(f.gateway.client.session.form)
+  f.gateway.client.session.form.reply = async input => {
+    entered.resolve()
+    await release.promise
+    return reply(input)
+  }
+  const answering = f.gateway.forms.act({ kind: "form-value", sessionID, id: "frm_test", field: "answer", value: "Done" })
+  await entered.promise
+  const reconciling = f.gateway.forms.reconcile(sessionID)
+  release.resolve()
+  await answering
+  expect(await reconciling).toEqual([])
+  expect(f.calls.filter(c => c.path.endsWith("/form"))).toHaveLength(2)
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(questionCount)
+  expect(f.store.get("form:frm_test")).toBeUndefined()
 })
 
 test("question parsing respects closed choices, numeric bounds, and conditional visibility", () => {

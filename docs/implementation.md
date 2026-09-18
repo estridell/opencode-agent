@@ -103,9 +103,14 @@ The gateway stores connection data in SQLite:
 
 OpenCode stores session history and execution state.
 
+Plugin installation and update state use the same atomic file replacement helper in `files.ts`.
+The helper writes a private temporary file beside the destination, then renames it.
+Readers receive a complete file. The helper removes temporary files after success or failure.
+
 ## Pickers and defaults
 
 The model, agent, and session pickers use one Telegram message for all pages.
+`pickers.ts` controls page limits and navigation for all three pickers.
 Model variants and the default question use that same message.
 When selection finishes, a short result replaces the message and its buttons.
 Buttons from previous pages or completed pickers cannot change a selection.
@@ -132,6 +137,7 @@ The gateway saves the assigned session before it submits the message.
 A retry therefore uses the original session, even if the owner selects another session.
 The polling offset changes after the gateway processes an update.
 Network failures during submission cause a retry.
+The polling loop processes input updates in sequence and awaits each handler before it changes the offset.
 
 The gateway gets completed assistant messages from OpenCode in pages.
 It saves a record for each part sent to Telegram and the last processed OpenCode message ID.
@@ -198,6 +204,9 @@ It supports these field functions:
 - Default values and optional answers.
 - Conditional fields.
 - Cancellation and external links.
+
+Form reconciliation reads pending forms once, inside the same lock that protects answers.
+This prevents a queued state check from using a form that an earlier answer already resolved.
 
 Text answers must reply to the applicable question message.
 Other messages remain available for instructions to the current task.

@@ -10,6 +10,7 @@ import { installedCliPath, unitName } from "./service"
 import { downloadRuntime, prepareRuntime, registrationFile, runtimeEnv, upstreamBinary } from "./runtime"
 import { installPlugins } from "./plugins"
 import { OpenCode } from "@opencode/client"
+import { optionalText, writeAtomic } from "./files"
 
 export type UpdateState = { id: string; phase: "running" | "done" | "failed"; text: string; time: number; messages?: string[] }
 export const updateUnit = () => `opencode-agent-update-${createHash("sha256").update(agentHome()).digest("hex").slice(0, 12)}`
@@ -65,12 +66,18 @@ export function releaseVersion(value: unknown): string {
   return version
 }
 
+type Dependencies = {
+  dependencies?: Record<string, string>
+  optionalDependencies?: Record<string, string>
+  peerDependencies?: Record<string, string>
+}
+
 /** Fingerprint only the gateway's resolved dependency graph, not plugin or development dependencies. */
 export async function gatewayDependencies(root: string): Promise<string> {
   const lock = Bun.JSON5.parse(await readFile(join(root, "bun.lock"), "utf8")) as {
     lockfileVersion: number
-    workspaces: Record<string, { name: string; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>; peerDependencies?: Record<string, string> }>
-    packages: Record<string, [string, string?, { dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>; peerDependencies?: Record<string, string> }?]>
+    workspaces: Record<string, Dependencies & { name: string }>
+    packages: Record<string, [string, string?, Dependencies?, ...unknown[]]>
   }
   if (lock.lockfileVersion !== 1) throw new Error("Unsupported Bun lockfile version.")
   const graph = new Map<string, unknown>()
@@ -93,9 +100,7 @@ export async function gatewayDependencies(root: string): Promise<string> {
     const parents = key.match(/(?:@[^/]+\/)?[^/]+/g)!
     for (const dep of Object.keys(metadata?.dependencies ?? {})) visit(dep, parents)
     for (const dep of Object.keys(metadata?.optionalDependencies ?? {})) visit(dep, parents, true)
-    if (metadata && "peerDependencies" in metadata) {
-      for (const dep of Object.keys(metadata.peerDependencies ?? {})) visit(dep, parents, true)
-    }
+    for (const dep of Object.keys(metadata?.peerDependencies ?? {})) visit(dep, parents, true)
   }
   const gateway = lock.workspaces["packages/telegram"]
   if (!gateway) throw new Error("The gateway is missing from the Bun lockfile.")
@@ -107,10 +112,7 @@ export async function gatewayDependencies(root: string): Promise<string> {
     return Object.fromEntries(["type", "imports", "exports", ...(file.startsWith("packages/") ? ["dependencies", "optionalDependencies", "peerDependencies"] : [])]
       .map(key => [key, manifest[key]]))
   }))
-  const configText = await readFile(join(root, "tsconfig.json"), "utf8").catch(error => {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-    return "{}"
-  })
+  const configText = await optionalText(join(root, "tsconfig.json")) ?? "{}"
   const config = Bun.JSON5.parse(configText) as { extends?: unknown; compilerOptions?: Record<string, unknown> }
   // Bun reads these settings during execution; type-check-only settings need no restart.
   const transforms = Object.fromEntries(["target", "module", "moduleResolution", "paths", "baseUrl", "jsx", "jsxFactory", "jsxFragmentFactory", "jsxImportSource", "experimentalDecorators", "emitDecoratorMetadata", "useDefineForClassFields", "verbatimModuleSyntax"]
@@ -185,8 +187,7 @@ export async function runUpdate(id: string, messageID?: number) {
     text = errorText(text, [config.token])
     messages.push(text)
     const state: UpdateState = { id, phase, text, time: Date.now(), messages }
-    await writeFile(`${jobFile(id)}.next`, JSON.stringify(state), { mode: 0o600 })
-    await rename(`${jobFile(id)}.next`, jobFile(id))
+    await writeAtomic(jobFile(id), JSON.stringify(state))
     await appendFile(log, `${new Date().toISOString()} ${text}\n`, { mode: 0o600 })
     console.log(text)
     if (!messageID) return
@@ -219,9 +220,7 @@ export async function runUpdate(id: string, messageID?: number) {
   let runtimePID = 0
   let selected = false
   const saveInstalled = async () => {
-    const file = join(agentHome(), "installed.json")
-    await writeFile(`${file}.next`, JSON.stringify({ commit, version, source: stage, time: Date.now() }, null, 2), { mode: 0o600 })
-    await rename(`${file}.next`, file)
+    await writeAtomic(join(agentHome(), "installed.json"), JSON.stringify({ commit, version, source: stage, time: Date.now() }, null, 2))
   }
   try {
     const changed = await applyUpdate({
@@ -346,5 +345,5 @@ export async function runUpdate(id: string, messageID?: number) {
 
 export async function markGatewayReady(version: string) {
   const state = { time: Date.now(), pid: process.pid, version, source: await realpath(sourceRoot()) }
-  await writeFile(join(agentHome(), "gateway-ready.json"), JSON.stringify(state), { mode: 0o600 })
+  await writeAtomic(join(agentHome(), "gateway-ready.json"), JSON.stringify(state))
 }
