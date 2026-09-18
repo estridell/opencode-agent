@@ -27,6 +27,9 @@ export class Store {
     this.db.query("INSERT OR REPLACE INTO kv VALUES (?, ?)").run(key, JSON.stringify(value))
   }
   delete(key: string) { this.db.query("DELETE FROM kv WHERE key = ?").run(key) }
+  entries<T>(prefix: string): { key: string; value: T }[] {
+    return this.db.query<{ key: string; value: string }, [number, string]>("SELECT key, value FROM kv WHERE substr(key, 1, ?) = ? ORDER BY rowid").all(prefix.length, prefix).map(row => ({ key: row.key, value: JSON.parse(row.value) as T }))
+  }
   sessions(): TrackedSession[] {
     return this.db.query<{ value: string }, []>("SELECT value FROM sessions ORDER BY rowid DESC").all().map(r => JSON.parse(r.value))
   }

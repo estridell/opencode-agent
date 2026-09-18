@@ -12,6 +12,17 @@ export async function connect(): Promise<Client> {
     version: version => /^2\./.test(version),
     command: ["env", "-i", ...Object.entries(runtimeEnv()).map(([key, value]) => `${key}=${value}`), upstreamBinary(), "serve", "--service"],
   })
+  return makeClient(endpoint)
+}
+
+/** Plugins use the already running owned service for APIs outside their in-process context. */
+export async function connectExisting(): Promise<Client> {
+  const endpoint = await Service.discover({ file: registrationFile() })
+  if (!endpoint) throw new Error("The managed OpenCode service is unavailable.")
+  return makeClient(endpoint)
+}
+
+function makeClient(endpoint: Awaited<ReturnType<typeof Service.ensure>>): Client {
   const boundedFetch = Object.assign((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
     return fetch(input, url.includes("/api/event") ? init : {

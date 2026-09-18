@@ -28,6 +28,7 @@ On other Linux distributions, install these packages first:
 - `unzip`
 - `tar`
 - `util-linux`, which supplies `flock`
+- Python 3.9 or later with virtual-environment support
 
 The installer puts Bun 1.3.14 in the agent directory.
 It then runs `bun install --frozen-lockfile`.
@@ -68,6 +69,7 @@ The installer keeps existing repository files.
 Setup uses plain text prompts. Token input is hidden.
 The configuration file uses mode `0600`, which permits access only by its Linux owner.
 Setup does not wait for a Telegram pairing message.
+Setup also prepares local English voice transcription and downloads its model.
 
 To sign in to a provider later, run:
 
@@ -89,8 +91,14 @@ All paths in this table are relative to that directory.
 | Path | Contents |
 | --- | --- |
 | `app/` | Repository copy from `--repo` |
-| `config.json` | Telegram token, user ID, and working directory |
+| `config.json` | Telegram connection and personal-assistant settings |
 | `telegram.sqlite` | Gateway state and delivery records |
+| `schedules.sqlite` | Scheduled tasks and pending submissions |
+| `memory/USER.md` | Personal preferences |
+| `memory/MEMORY.md` | Other durable facts |
+| `attachments/` | Incoming Telegram files |
+| `voice/` | Separate Python environment, speech model, and cache |
+| `bin/opencode-agent` | Private command launcher for native agent tools |
 | `gateway.lock` | Lock that prevents a second gateway process |
 | `tools/bun/` | Bun runtime from the installer |
 | `workspace/` | Default working directory |
@@ -121,6 +129,75 @@ It uses one-time approvals for bot sessions and their child sessions.
 OpenCode deny rules still apply. Agent questions still require an answer.
 Set `"autoApprove": false` in `config.json` to use manual permission buttons.
 Restart the gateway after changing this setting.
+
+## Project settings
+
+Use the configuration commands to inspect or change one setting:
+
+```sh
+opencode-agent config get
+opencode-agent config get memory.maxChars
+opencode-agent config set memory.maxChars 3000
+opencode-agent config set timezone Europe/Stockholm
+opencode-agent config set progress false
+```
+
+The commands validate changes and replace the configuration file atomically.
+A file lock prevents setup and parallel configuration commands from overwriting each other's changes.
+Configuration output hides the Telegram token.
+The configuration setter does not change the bot token or owner. Use setup for those fields.
+Memory, timezone, progress, voice settings, and scheduler enablement reload automatically.
+Changes to the default directory or `autoApprove` require a gateway restart.
+
+| Setting | Default | Function |
+| --- | --- | --- |
+| `timezone` | Machine timezone | Timezone for new recurring tasks |
+| `progress` | `true` | Show one short activity message |
+| `memory.enabled` | `true` | Include memory and memory instructions in agent context |
+| `memory.maxChars` | `2200` | Context limit for `MEMORY.md` |
+| `memory.userMaxChars` | `1375` | Context limit for `USER.md` |
+| `schedules.enabled` | `true` | Start scheduled tasks while the gateway runs |
+| `voice.enabled` | `true` | Accept Telegram voice transcription |
+| `voice.model` | `tiny.en` | Local Whisper model |
+| `voice.language` | `en` | Speech language |
+| `voice.threads` | `4` | CPU threads for transcription |
+| `voice.timeoutSeconds` | `120` | Maximum transcription time |
+
+Memory limits affect injected context. They do not delete or truncate the files on disk.
+The agent uses native file tools to maintain those files.
+Disabling memory preserves the files and saved conversation history.
+
+Changing the default timezone does not change existing task timezones.
+Ask the agent to update an existing task when necessary.
+Disabling schedules stops new submissions. Already submitted OpenCode tasks can continue.
+Re-enabling schedules skips runs missed while scheduling was disabled.
+
+## Voice transcription
+
+The decoder uses `faster-whisper` 1.2.1 with CPU INT8 and a beam size of one.
+It filters silence before transcription. Audio decoding uses PyAV's bundled FFmpeg libraries.
+The gateway does not need an FFmpeg executable.
+
+To change the local speech model:
+
+1. Set the model:
+
+   ```sh
+   opencode-agent config set voice.model base.en
+   ```
+
+2. Prepare the model:
+
+   ```sh
+   opencode-agent voice setup
+   ```
+
+Preparation requires network access. Transcription uses the downloaded model without network access.
+The model runs in a separate process for each voice message.
+Preparation allows at least ten minutes for package installation and model download.
+
+Incoming attachments remain in `attachments/` until removed.
+Keep files required by saved tasks or conversations when cleaning that directory.
 
 ## Background service
 
@@ -221,7 +298,8 @@ Plugin additions, changes, renames, and removals keep Telegram and OpenCode runn
 OpenCode's file watcher automatically loads, reloads, and unloads these plugins.
 Documentation, tests, and development-only changes also keep services running.
 Plugin-only dependency changes keep services running when the gateway's resolved dependencies remain the same.
-Changes to gateway code, gateway dependencies, execution settings, or the installer restart the Telegram gateway.
+Changes to gateway code, voice assets, gateway dependencies, execution settings, or the installer restart the Telegram gateway.
+Service installation also prepares the configured speech model when voice transcription is enabled.
 An unchanged installation reports that it is up to date without a restart.
 
 Updates require the systemd user service.
@@ -251,8 +329,8 @@ For development, test runtime and client changes together with `bun run test:liv
 The initial runtime version comes from `packages/telegram/package.json`.
 
 The application context note is in `packages/plugins/context.ts`.
-After plugin reload, the next agent request receives the note in existing and new Telegram sessions.
-The note also applies to their child sessions.
+After plugin reload, the next agent request receives the note in existing and new managed sessions.
+Telegram sessions and their child sessions also receive transport-specific instructions.
 
 To test plugin activation and outgoing system instructions with a temporary runtime, run:
 
@@ -284,7 +362,7 @@ Restart the gateway after this change.
 
 1. Send `/start`.
 2. Ask the agent to list the working directory.
-3. Check that the typing indicator and a final response appear without extra status messages.
+3. Check that one short activity message becomes the final response.
 4. Send new instructions while the agent works.
 5. Check that the agent uses the instructions in the same session.
 6. Send `/stop` to test interruption.
@@ -314,6 +392,24 @@ Restart the gateway after this change.
 30. Check that the answer uses the image contents.
 31. Send a PNG image as a file without a caption.
 32. Check that the agent analyzes the image in the current session.
+33. Send a document with a question in its caption.
+34. Ask the agent to attach a generated text file.
+35. Check that Telegram receives the file instead of only its path.
+36. Send an English voice message.
+37. Check that the agent acts on its transcription.
+38. Ask the agent to remember a preference.
+39. Start a new session.
+40. Ask about that preference and a fact from an earlier conversation.
+41. Create a one-time task a few minutes in the future.
+42. Check that its result arrives without changing the selected chat session.
+43. Create a recurring task.
+44. Ask the agent to pause, resume, and remove that task.
+45. Stop the gateway before another one-time task becomes due.
+46. Start the gateway after that time.
+47. Check that the missed task does not run.
+48. Use `/usage` and `/compact` to inspect usage and compact context.
+49. Use `/retry` after a failed model request.
+50. Check that the session continues without another copy of the user message.
 
 Automated tests use a simulated Telegram API.
 The live API test uses a real temporary V2 service without a model provider call.

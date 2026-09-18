@@ -1,9 +1,11 @@
 import { join } from "node:path"
-import { mkdir, access } from "node:fs/promises"
+import { mkdir, access, stat } from "node:fs/promises"
 import { createServer } from "node:net"
 import { agentHome } from "./config"
 import manifest from "../package.json"
 import { installPlugins } from "./plugins"
+import { installedCliPath } from "./service"
+import { optionalText, writeAtomic } from "./files"
 
 export const upstreamVersion = manifest.dependencies["@opencode/client"]
 export const runtimeHome = () => join(agentHome(), "runtime", "home")
@@ -20,6 +22,7 @@ export function runtimeEnv(source: NodeJS.ProcessEnv = process.env): Record<stri
   const root = join(agentHome(), "runtime")
   return {
     ...env,
+    OPENCODE_AGENT_HOME: agentHome(),
     HOME: runtimeHome(),
     XDG_CONFIG_HOME: join(root, "config"),
     XDG_DATA_HOME: join(root, "data"),
@@ -27,7 +30,7 @@ export function runtimeEnv(source: NodeJS.ProcessEnv = process.env): Record<stri
     XDG_CACHE_HOME: join(root, "cache"),
     XDG_RUNTIME_DIR: join(root, "run"),
     TMPDIR: join(root, "tmp"),
-    PATH: `${join(runtimeHome(), ".opencode", "bin")}:${source.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
+    PATH: `${join(agentHome(), "bin")}:${join(runtimeHome(), ".opencode", "bin")}:${source.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
   }
 }
 
@@ -35,6 +38,21 @@ export async function prepareRuntime() {
   const env = runtimeEnv()
   for (const path of [agentHome(), workspace(), env.HOME!, env.XDG_CONFIG_HOME!, env.XDG_DATA_HOME!, env.XDG_STATE_HOME!, env.XDG_CACHE_HOME!, env.XDG_RUNTIME_DIR!, env.TMPDIR!]) {
     await mkdir(path, { recursive: true, mode: 0o700 })
+  }
+  // Native shell tools must reach the project CLI despite the separate HOME.
+  const directory = join(agentHome(), "bin")
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+  const launcher = join(directory, "opencode-agent")
+  const previous = await optionalText(launcher)
+  // The management CLI needs the owner's systemd environment. OpenCode commands isolate it again in runOpenCode.
+  const management = ["HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"].map(key =>
+    process.env[key] === undefined ? `unset ${key}` : `export ${key}=${quote(process.env[key]!)}`,
+  ).join("\n")
+  const text = `#!/bin/sh\nexport OPENCODE_AGENT_HOME=${quote(agentHome())}\n${management}\nexec ${quote(process.execPath)} ${quote(installedCliPath())} "$@"\n`
+  const content = process.env.HOME === runtimeHome() && previous ? previous : text
+  if (previous !== content || ((await stat(launcher)).mode & 0o777) !== 0o700) {
+    await writeAtomic(launcher, content, 0o700)
   }
 }
 

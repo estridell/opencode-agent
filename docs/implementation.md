@@ -14,12 +14,18 @@ It uses an unchanged upstream OpenCode V2 runtime in a separate installation.
 | Working directory | A configurable directory, initially `~/.opencode-agent/workspace` |
 | New instructions | Upstream `delivery: "steer"` for tasks in progress |
 | Interruption | The upstream session interrupt API |
-| Output | Completed assistant messages and a temporary Telegram typing indicator |
+| Output | One short activity message, replaced by the final response; optional typing-only mode |
 | Questions | OpenCode forms with buttons or text replies |
 | Permissions | Automatic one-time approval by default; optional manual decisions |
 | Models | Model, variant, and agent selection, with optional defaults for new bot sessions |
 | Setup | Plain terminal prompts and direct Telegram user-ID entry |
 | Background operation | A systemd user service |
+| Personal context | A native context hook and an additive OpenCode Agent skill |
+| Memory | Two plain files, maintained with native tools and included with configurable context limits |
+| Conversation recall | Bounded transcript reads through the public OpenCode API |
+| Scheduled tasks | Persisted one-time dates or cron expressions; fresh OpenCode sessions; skip missed runs |
+| Voice | English transcription with local faster-whisper and CPU INT8 |
+| Files | Local incoming files and explicit outgoing attachment markers |
 
 Earlier sessions can continue to work after the owner selects a different session.
 The owner can specify a repository in a normal text message.
@@ -48,6 +54,9 @@ The managed V2 service rejects port zero and uses a fixed default port.
 Separate file paths alone do not prevent a port conflict.
 
 The command `opencode-agent opencode <args>` uses the same separate environment.
+The runtime receives `OPENCODE_AGENT_HOME` and a private command launcher on `PATH`.
+The launcher restores the owner's systemd environment for management commands. Native OpenCode commands apply isolation again before execution.
+Plugins can also identify earlier managed services from their matching HOME and XDG paths.
 OpenCode controls provider sign-in, models, permissions, plugins, tools, and agent behavior.
 OpenCode still reads configuration from working repositories.
 
@@ -55,13 +64,17 @@ OpenCode still reads configuration from working repositories.
 
 `packages/plugins/context.ts` exports the `opencode-agent.context` plugin.
 It appends a short application note through the V2 `context` hook before each agent-loop model request.
-The note describes a general-purpose assistant that communicates through Telegram and operates on the configured agent machine.
+The note describes a personal assistant that operates on the configured agent machine.
 It preserves all upstream model-specific instructions and any custom agent system prompt.
 The plugin registers no tools and does not add conversation messages.
+It adds an `opencode-agent` skill by extending the current bundled `opencode` skill through a native skill transform.
+The added guidance covers project configuration, managed commands, Telegram files, memory, and scheduled tasks.
+Native skills, MCP, Code Mode, web tools, and model providers remain upstream functions.
 
-The plugin checks session metadata for `source: "opencode-agent"` and `transport: "telegram"`.
-It follows parent session IDs so child agents receive the same context.
-Unrelated sessions do not receive the note.
+Managed terminal sessions receive the personal-assistant context and memory too.
+The plugin checks session metadata for `source: "opencode-agent"` and `transport: "telegram"` before adding Telegram-specific instructions.
+It follows parent session IDs so child agents receive the same transport context.
+The installation path, private command path, timezone, and current time are included in the context.
 Each outgoing request receives at most one copy.
 Title, compaction, and transient generation requests retain their existing instructions.
 
@@ -100,6 +113,8 @@ The gateway stores connection data in SQLite:
 - Answers to questions that are not yet complete.
 - Picker message IDs, page revisions, and completion state.
 - Model, variant, and agent defaults for new bot sessions.
+- Pending voice requests and completed transcriptions awaiting admission.
+- Activity message IDs and the original user message ID for retry.
 
 OpenCode stores session history and execution state.
 
@@ -121,8 +136,12 @@ OpenCode still controls model availability and execution.
 This preference applies to new Telegram sessions, not the global OpenCode configuration or existing sessions.
 Without a saved preference, OpenCode uses its normal defaults.
 
-The gateway does not send automatic working or ready messages.
-Telegram shows a temporary typing indicator during work in the selected session.
+The gateway shows one short activity message during work.
+Native events select small labels such as `Thinking.` or `Running shell.`
+The event reader only records state. Reconciliation performs Telegram edits through the normal rate-limited queue.
+The final response replaces the activity message. Additional text uses the existing message splitting behavior.
+Intermediate assistant text associated with tool calls does not produce separate chat messages.
+Disabling `progress` retains the temporary typing indicator without activity messages.
 The `/status` command shows details only when requested.
 
 ## Message delivery and recovery
@@ -155,6 +174,19 @@ A connection failure can occur after Telegram accepts a response but before the 
 A retry can then send the response again.
 Stable OpenCode input IDs prevent this delivery problem from repeating the agent task.
 
+### Usage, compaction, and retry
+
+`/usage` reads cumulative session usage and estimates current context from the latest assistant usage in native active context.
+It does not treat cumulative token totals as current context occupancy.
+`/compact` submits a native compaction control with a stable ID.
+The response confirms admission, not completion.
+
+`/retry` and failure buttons require an idle, failed session and its original saved user message.
+The gateway verifies that message through the native API.
+It then submits the same ID and text with `resume: true`.
+OpenCode reconciles the existing admission before prompt preparation and resumes execution without another user message.
+The gateway does not repeat completed tool calls itself.
+
 ## Image input
 
 The gateway accepts Telegram photos and image documents.
@@ -177,6 +209,94 @@ Images use the same saved session route and stable message ID as text input.
 Download connection failures and ambiguous admission failures can retry without a second model execution.
 The gateway keeps downloads in memory; OpenCode stores admitted attachments with session data.
 Each image in a Telegram album becomes a separate request.
+
+## File transport
+
+Non-image documents are downloaded with the same bounded Telegram transfer code.
+The gateway stores them under `attachments/<content-hash>/<filename>` in the agent directory.
+It removes path components and control characters from display filenames.
+The prompt contains the local path. Native tools read or process the file.
+This transport accepts files without adding document extraction or conversion services.
+
+An agent requests an upload with `MEDIA:/absolute/path` on a separate response line.
+The gateway ignores markers inside code blocks and leaves ordinary paths as text.
+It removes recognized markers from the visible response and uploads each file.
+Supported photo uploads use Telegram photos; other files use documents.
+File delivery records prevent repeated uploads after a normal restart.
+Telegram's ambiguous delivery limitation also applies to file uploads.
+
+Incoming files are limited to 20 MiB. Outgoing files are limited to 50 MiB.
+Files remain available until removed. Retention is an open question below.
+
+## Local voice transcription
+
+`voice.ts` owns a separate Python virtual environment and model cache under `voice/`.
+Setup installs `faster-whisper` 1.2.1 and downloads `tiny.en` by default.
+The Python helper uses CPU INT8, one decoding beam, and a silence filter.
+PyAV supplies audio decoding. The gateway does not require a separate FFmpeg executable.
+
+The gateway stores a voice request before advancing the Telegram polling offset.
+A separate worker transcribes the local file and submits the resulting text to the original session.
+Saved transcriptions avoid repeated speech decoding after an ambiguous OpenCode submission failure.
+The worker uses the original stable OpenCode message ID.
+Polling remains available during transcription. `/stop` removes pending voice requests for the selected session.
+
+Subprocesses use argument arrays, a bounded output reader, and a timeout with a forced termination fallback.
+Transcription loads only local model files. Model preparation requires network access.
+The default transcription timeout is 120 seconds. Package installation and model download allow at least ten minutes each.
+
+## Personal memory and recall
+
+The context plugin prepares `memory/USER.md` and `memory/MEMORY.md` without replacing existing contents.
+It reads a bounded amount before each agent request.
+The defaults are 1375 characters for user preferences and 2200 characters for other durable facts.
+Limits affect injected text only. Oversized files remain intact and produce an instruction to read and shorten them.
+
+The agent maintains memory during ordinary work with native file tools.
+There is no background memory review, separate memory model, or automatic skill-generation process.
+Disabling memory removes its context and instructions while preserving files and OpenCode history.
+
+The recall plugin exposes `assistant.recall` through native Code Mode.
+It lists sessions, reads bounded message pages, or searches user and assistant text across sessions.
+Search returns a continuation cursor and scans at most five transcript pages per call.
+The search uses native session and message APIs because native title search does not search transcript contents.
+The installed plugin context lacks full history methods, so recall discovers the already running managed service for these public APIs.
+It does not query OpenCode's database or store a second transcript copy.
+
+## Scheduled tasks
+
+The scheduling plugin exposes `assistant.schedule` through native Code Mode.
+It supports create, list, update, pause, resume, and remove operations.
+Tasks use an explicit one-time date or a five-field cron expression with an IANA timezone.
+Croner calculates recurrence times. It does not execute tasks or own a separate timer service.
+The scheduler rejects invalid calendar dates and ensures that each next occurrence is strictly in the future.
+
+`schedules.sqlite` stores task definitions and pending submissions.
+The gateway's scheduler loop claims due tasks transactionally and advances their next run before submission.
+Each occurrence has deterministic OpenCode session and message IDs.
+Pending submissions can retry without creating another execution.
+Pause, removal, and edits invalidate pending snapshots before submission.
+
+The gateway creates a fresh native OpenCode session for each occurrence and tracks it before sending the prompt.
+These sessions use the existing delivery, permission, question, and recovery paths.
+They do not replace the owner's selected chat session.
+Recurring tasks skip an occurrence when their preceding session remains active.
+
+Gateway startup skips overdue, unclaimed runs. Re-enabling scheduling also skips runs missed while scheduling was disabled.
+Submissions already claimed before an interruption retain their stable IDs for recovery.
+Pausing a task does not interrupt work already admitted by OpenCode.
+The task list includes its next run and the last submission state or error.
+
+## Project configuration
+
+`opencode-agent config get [key]` displays settings with credentials hidden.
+`opencode-agent config set <key> <value>` validates and atomically saves one change.
+The existing `flock` system dependency protects setup saves and configuration setters across processes.
+Each update reads the latest configuration under the lock. Setup merges only the fields collected from its prompts.
+The setter rejects bot-token and owner changes. Setup handles those fields and the gateway identity check.
+The gateway reloads memory, voice, timezone, progress, and scheduler settings during operation.
+Bot identity, default directory, and automatic-approval changes require a gateway restart.
+The native OpenCode configuration remains the source for providers, tools, MCP, skills, and permissions.
 
 ## Permissions and questions
 
@@ -233,6 +353,7 @@ The restart steps are optional and separate from these standard steps.
 
 - An OpenCode runtime version change.
 - Added, changed, or removed files under `packages/telegram/src/`.
+- Added, changed, or removed voice assets under `packages/telegram/assets/`.
 - Changes to `install.sh`, `bunfig.toml`, or `packages/telegram/bunfig.toml`.
 - Changes to the gateway's resolved runtime dependencies or module execution settings.
 
@@ -280,6 +401,7 @@ Previous application directories remain on disk.
 ### Open questions
 
 - Define retention limits for application directories and update logs.
+- Define retention limits for incoming attachments and completed scheduled-task sessions.
 
 ## API versions
 
@@ -295,9 +417,11 @@ The live test checks the API with a real, separate V2 service.
 
 ## Current limits
 
-- Input supports text and images. Audio, video, PDF, and other document formats are not supported.
+- Voice input transcribes English by default. Spoken responses are not implemented.
+- File transport does not add document extraction. Native tools determine how each file can be processed.
 - Text formatting supports bold text, inline code, and code blocks. Other Markdown stays as text.
-- There are no memory or scheduling plugins.
+- Recall uses bounded keyword scanning through native APIs. There is no separate full-text or semantic index.
+- Scheduled tasks require the Telegram gateway. General periodic monitoring and external event triggers are not implemented.
 - Session selection shows sessions from this bot only.
 - Each installation supports one owner.
 - Background installation supports Linux systemd user services.

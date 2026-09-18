@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionContext } from "@opencode/plugin/promise/session"
-import plugin, { applicationContext } from "../../plugins/context"
+import plugin, { applicationContext, telegramContext } from "../../plugins/context"
 import { bundledPlugins, installPlugins } from "../src/plugins"
 
 test("context applies to Telegram descendants and preserves base instructions and tool definitions", async () => {
@@ -27,7 +27,7 @@ test("context applies to Telegram descendants and preserves base instructions an
     expect(event.system[0]).toBe(base)
     expect(event.tools).toBe(tools)
     expect(event.system.map(part => part.text)).toEqual(
-      ["root", "child", "grandchild"].includes(sessionID) ? [base.text, applicationContext] : [base.text],
+      ["root", "child", "grandchild"].includes(sessionID) ? [base.text, applicationContext, telegramContext] : [base.text],
     )
   }
 })
