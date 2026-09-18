@@ -1,0 +1,5 @@
+{
+  "token": "123456789:REPLACE_WITH_YOUR_BOTFATHER_TOKEN",
+  "ownerID": 123456789,
+  "directory": "/home/agent/.opencode-agent/workspace"
+}
