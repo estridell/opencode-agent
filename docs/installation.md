@@ -182,17 +182,61 @@ The Telegram bot must not have an active webhook or another polling process.
 The gateway reports these conditions and keeps any existing webhook.
 Stop the background gateway before you start a terminal copy.
 
-## Update the repository
+## Update
 
-1. Update the repository with Git.
-2. Run `bun install --frozen-lockfile`.
-3. Run `bun run check`.
-4. Run `bun test`.
-5. Restart the gateway.
+Run this command:
 
-When you change an API or client version, test the client and runtime together with `bun run test:live`.
-The runtime version is in `packages/telegram/src/runtime.ts`.
-The client version is in `packages/telegram/package.json`.
+```sh
+opencode-agent update
+```
+
+You can also send `/update` in the private Telegram chat.
+Both commands use the same update worker.
+The terminal shows each update stage.
+Telegram changes one message as the update progresses.
+The final result replaces that message after the gateway connects.
+
+The updater downloads `main` from the installed repository's `origin` remote.
+It prepares the application in `~/.opencode-agent/versions/<update-id>`.
+It installs project dependencies and the client that matches the latest OpenCode V2 release.
+It runs type checks and automated tests before stopping the gateway.
+It then runs the new installer and replaces the generated service file.
+The installer selects the private Bun version.
+
+The launcher and service use `~/.opencode-agent/current`, a link to the selected application directory.
+Your development checkout remains separate after the first update.
+Push changes to `main` before updating the installed application.
+Uncommitted changes in a development checkout do not enter the update.
+
+The worker restarts OpenCode when the runtime version changes.
+This restart can interrupt active tasks.
+Application-only updates restart the Telegram gateway while OpenCode continues to run.
+An unchanged installation reports that it is up to date without a restart.
+
+Updates require the systemd user service.
+Install it with `opencode-agent gateway install` if necessary.
+The update worker continues if the terminal closes or the gateway stops.
+Only one update can run for an agent directory.
+
+Update state and logs are in `~/.opencode-agent/updates/`.
+The installed application commit and runtime version are in `~/.opencode-agent/installed.json`.
+Preparation failures leave the running gateway unchanged.
+After a later failure, the updater tries to restart the selected installation and reports the error.
+It does not automatically downgrade an OpenCode database after a runtime update.
+
+Use these commands after an update failure:
+
+```sh
+opencode-agent gateway logs
+opencode-agent doctor
+opencode-agent update
+```
+
+Previous application directories remain available for inspection.
+Local configuration, credentials, gateway data, sessions, and workspace files remain outside these directories.
+
+For development, test runtime and client changes together with `bun run test:live` under a temporary `/tmp/opencode` directory.
+The initial runtime version comes from `packages/telegram/package.json`.
 
 ## Acceptance test
 

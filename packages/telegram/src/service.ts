@@ -2,10 +2,12 @@ import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { existsSync } from "node:fs"
 import { agentHome } from "./config"
 
 export const unitName = "opencode-agent.service"
 export const cliPath = () => fileURLToPath(new URL("./main.ts", import.meta.url))
+export const installedCliPath = () => existsSync(join(agentHome(), "current")) ? join(agentHome(), "current", "packages/telegram/src/main.ts") : cliPath()
 export const unitPath = () => join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "systemd", "user", unitName)
 
 export function systemdQuote(value: string): string {
@@ -42,7 +44,7 @@ export async function installService(start = true) {
   const temporary = await mkdtemp(join(dirname(file), ".opencode-agent-check-"))
   try {
     const candidate = join(temporary, unitName)
-    await writeFile(candidate, serviceUnit(process.execPath, cliPath(), agentHome(), process.env.PATH ?? "/usr/bin:/bin"), { mode: 0o600 })
+    await writeFile(candidate, serviceUnit(process.execPath, installedCliPath(), agentHome(), process.env.PATH ?? "/usr/bin:/bin"), { mode: 0o600 })
     await verifyService(candidate)
     await rename(candidate, file)
   } finally { await rm(temporary, { recursive: true, force: true }) }

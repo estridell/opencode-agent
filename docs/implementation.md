@@ -139,6 +139,41 @@ The gateway removes active buttons after it detects a completed interaction.
 Only the configured owner in the private chat can submit a prompt or use an action button.
 Button data contains a short local ID. It does not contain credentials or a complete upstream action.
 
+## Updates
+
+The terminal `update` command and Telegram `/update` start the same systemd user worker.
+A unit name derived from the agent directory and an advisory lock prevent concurrent updates.
+The worker runs independently of the gateway service and the terminal.
+
+Each update clones `main` into a new application directory.
+It resolves the latest V2 release through the upstream update API.
+It selects that exact `@opencode/client` version in the prepared copy.
+It installs dependencies and runs type checks and tests before stopping the gateway.
+Repository dependency versions otherwise follow the committed lockfile.
+The installer selects the Bun version and regenerates the launcher.
+
+An atomic link replacement selects the application directory at `current`.
+The new application's service installer checks and installs the systemd unit.
+The worker replaces the runtime binary only after stopping the separate OpenCode service.
+It retains the previous binary in the prepared application directory.
+It does not change the host OpenCode installation.
+
+The gateway records readiness after the first successful Telegram polling request.
+Readiness includes the connection time, application directory, and connected runtime version.
+The worker checks these values before reporting success.
+It saves each progress stage to disk and changes the same Telegram message.
+Telegram rate limits delay progress edits without cancelling the update.
+
+Preparation failure leaves the gateway running.
+Failure after shutdown triggers a restart attempt and a failure report.
+Automatic database rollback is not implemented.
+Previous application directories remain on disk.
+
+### Open questions
+
+- Define retention limits for application directories and update logs.
+- Add plugin activation steps when the first plugin is implemented.
+
 ## API versions
 
 The tested versions are OpenCode V2 **2.0.8** and `@opencode/client` **2.0.8**.

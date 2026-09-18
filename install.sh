@@ -79,12 +79,15 @@ else
 fi
 
 bun="$home/tools/bun/bin/bun"
-if [[ ! -x "$bun" ]]; then
+bun_version="1.3.14"
+if [[ ! -x "$bun" ]] || [[ "$("$bun" --version)" != "$bun_version" ]]; then
   mkdir -p "$home/tools"
   curl -fsSL https://bun.sh/install -o "$home/tools/install-bun.sh"
-  BUN_INSTALL="$home/tools/bun" bash "$home/tools/install-bun.sh" bun-v1.3.14
+  BUN_INSTALL="$home/tools/bun" bash "$home/tools/install-bun.sh" "bun-v$bun_version" >"$home/tools/install-bun.log" 2>&1
 fi
 (cd "$source_dir" && "$bun" install --frozen-lockfile)
+ln -s "$source_dir" "$home/current.next.$$"
+mv -Tf "$home/current.next.$$" "$home/current"
 mkdir -p "$HOME/.local/bin"
 launcher="$HOME/.local/bin/opencode-agent"
 if [[ -e "$launcher" ]] && ! grep -q '^# OpenCode Agent managed launcher$' "$launcher"; then
@@ -95,7 +98,7 @@ fi
   echo '#!/usr/bin/env bash'
   echo '# OpenCode Agent managed launcher'
   printf 'if [[ -z "${OPENCODE_AGENT_HOME:-}" ]]; then export OPENCODE_AGENT_HOME=%q; fi\n' "$home"
-  printf 'exec %q %q "$@"\n' "$bun" "$source_dir/packages/telegram/src/main.ts"
+  printf 'exec %q %q "$@"\n' "$bun" "$home/current/packages/telegram/src/main.ts"
 } > "$launcher"
 chmod 755 "$launcher"
 printf 'Installed %s\n' "$launcher"

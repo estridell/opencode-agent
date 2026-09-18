@@ -8,16 +8,23 @@ import { setup } from "./setup"
 import { SetupCancelled } from "./prompts"
 import { cliPath, installService, systemctl, unitName } from "./service"
 import { prepareRuntime, runOpenCode, upstreamBinary, registrationFile } from "./runtime"
+import { followUpdate, markGatewayReady, runUpdate, startUpdate } from "./update"
 
 process.umask(0o077)
 
 async function main(args: string[]) {
   const [command, subcommand, ...rest] = args
   if (command === "--help" || command === "help") {
-    console.log(`OpenCode Agent (unofficial)\n\n  opencode-agent                    Open the separate OpenCode terminal interface\n  opencode-agent setup              Configure OpenCode and Telegram\n  opencode-agent opencode <args>     Run a command in the separate V2 installation\n  opencode-agent gateway run         Run Telegram in the terminal\n  opencode-agent gateway install     Install and start the systemd user service\n  opencode-agent gateway start|stop|restart|status\n  opencode-agent gateway logs        Show gateway logs\n  opencode-agent doctor              Check OpenCode and Telegram\n\nInstallation directory: ${agentHome()}`)
+    console.log(`OpenCode Agent (unofficial)\n\n  opencode-agent                    Open the separate OpenCode terminal interface\n  opencode-agent setup              Configure OpenCode and Telegram\n  opencode-agent update             Update the application and OpenCode\n  opencode-agent opencode <args>     Run a command in the separate V2 installation\n  opencode-agent gateway run         Run Telegram in the terminal\n  opencode-agent gateway install     Install and start the systemd user service\n  opencode-agent gateway start|stop|restart|status\n  opencode-agent gateway logs        Show gateway logs\n  opencode-agent doctor              Check OpenCode and Telegram\n\nInstallation directory: ${agentHome()}`)
     return
   }
   if (command === "setup") return setup()
+  if (command === "update") {
+    if (subcommand === "_run") return runUpdate(rest[0]!, rest[1] ? Number(rest[1]) : undefined)
+    if (subcommand) throw new Error("Use opencode-agent update without arguments.")
+    await loadConfig()
+    return followUpdate(await startUpdate())
+  }
   if (!command || command === "opencode") {
     let directory: string | undefined
     try { directory = (await loadConfig()).directory } catch { /* CLI sign-in works before Telegram setup. */ }
@@ -36,6 +43,7 @@ async function main(args: string[]) {
     return
   }
   if (command === "gateway") {
+    if (subcommand === "_install") return installService(false)
     if (subcommand === "install") { await loadConfig(); return installService() }
     if (["start", "stop", "restart", "status"].includes(subcommand ?? "")) return systemctl([subcommand!, unitName])
     if (subcommand === "logs") {
@@ -62,7 +70,8 @@ async function main(args: string[]) {
       const store = new Store(join(agentHome(), "telegram.sqlite"))
       try {
         const gateway = new Gateway(config, store, await connect())
-        await gateway.run(controller.signal)
+        const info = await gateway.client.server.info()
+        await gateway.run(controller.signal, connect, () => markGatewayReady(info.version))
       } finally { controller.abort(); store.close() }
       return
     }

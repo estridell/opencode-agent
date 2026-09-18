@@ -2,8 +2,9 @@ import { join } from "node:path"
 import { mkdir, access } from "node:fs/promises"
 import { createServer } from "node:net"
 import { agentHome } from "./config"
+import manifest from "../package.json"
 
-export const upstreamVersion = "2.0.8"
+export const upstreamVersion = manifest.dependencies["@opencode/client"]
 export const runtimeHome = () => join(agentHome(), "runtime", "home")
 export const upstreamBinary = () => join(runtimeHome(), ".opencode", "bin", "opencode")
 export const registrationFile = () => join(agentHome(), "runtime", "state", "opencode", "service.json")
@@ -63,31 +64,38 @@ async function configureService() {
 
 export async function installRuntime() {
   await prepareRuntime()
+  await downloadRuntime(upstreamVersion, runtimeHome())
+  await configureService()
+  console.log(`OpenCode V2 ${upstreamVersion} installed.`)
+}
+
+export async function downloadRuntime(version: string, home: string) {
   const env = runtimeEnv()
+  await mkdir(home, { recursive: true, mode: 0o700 })
   // Download completely before executing; pin both the V2 installer and the requested V2 release.
-  const response = await fetch("https://opencode.ai/v2/install")
+  const response = await fetch("https://opencode.ai/v2/install", { signal: AbortSignal.timeout(30_000) })
   if (!response.ok) throw new Error(`OpenCode V2 installer download failed: HTTP ${response.status}`)
-  const installer = join(env.TMPDIR!, "install-opencode.sh")
+  const installer = join(home, "install-opencode.sh")
   await Bun.write(installer, await response.text())
   // The upstream installer reports any opencode on PATH as "Installed version".
   // Limit this install-only PATH to our binary and system utilities.
-  const installEnv = { ...env, PATH: `${join(runtimeHome(), ".opencode", "bin")}:/usr/bin:/bin` }
-  const child = Bun.spawn(["bash", installer, "--version", upstreamVersion, "--no-modify-path"], {
-    env: installEnv, cwd: workspace(), stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  const installEnv = { ...env, HOME: home, TMPDIR: home, PATH: `${join(home, ".opencode", "bin")}:/usr/bin:/bin` }
+  const child = Bun.spawn(["bash", installer, "--version", version, "--no-modify-path"], {
+    env: installEnv, cwd: home, stdin: "ignore", stdout: "pipe", stderr: "pipe",
   })
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
   ])
   if (exitCode !== 0) {
-    const log = join(env.TMPDIR!, "install-opencode.log")
+    const log = join(home, "install-opencode.log")
     await Bun.write(log, stdout + stderr)
     throw new Error(`OpenCode V2 installation failed. Read the log: ${log}`)
   }
-  const check = Bun.spawn([upstreamBinary(), "--version"], { env, stdout: "pipe", stderr: "pipe" })
-  const version = (await new Response(check.stdout).text()).trim()
-  if (await check.exited !== 0 || !version.endsWith(`v${upstreamVersion}`) && !version.endsWith(` ${upstreamVersion}`)) throw new Error(`Unexpected OpenCode version: ${version}`)
-  await configureService()
-  console.log(`OpenCode V2 ${upstreamVersion} installed.`)
+  const binary = join(home, ".opencode", "bin", "opencode")
+  const check = Bun.spawn([binary, "--version"], { env, stdout: "pipe", stderr: "pipe" })
+  const output = (await new Response(check.stdout).text()).trim()
+  if (await check.exited !== 0 || !output.endsWith(`v${version}`) && !output.endsWith(` ${version}`)) throw new Error(`Unexpected OpenCode version: ${output}`)
+  return binary
 }
 
 export async function runOpenCode(args: string[], directory = workspace()) {

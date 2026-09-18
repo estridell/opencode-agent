@@ -9,6 +9,7 @@ import { Store, type Action, type TrackedSession } from "./store"
 import { Telegram } from "./telegram"
 import { Forms } from "./forms"
 import { Pickers, type Choice } from "./pickers"
+import { startUpdate } from "./update"
 
 type Defaults = { model?: ModelRef; agent?: string }
 const modelLabel = (model: ModelRef) => `${model.providerID}/${model.id}${model.variant ? ` (${model.variant})` : ""}`
@@ -20,9 +21,10 @@ export const commands = [
   { command: "status", description: "Show the current session" },
   { command: "model", description: "Choose a model (optional search text)" },
   { command: "agent", description: "Choose an agent" },
+  { command: "update", description: "Update the application and OpenCode" },
   { command: "help", description: "Show commands and usage" },
 ]
-const help = `**OpenCode Agent**\nSend a text request. New messages give instructions to the task in progress.\n\n/new [title] - create a session\n/sessions - select a previous bot session\n/stop - stop work in the selected session\n/status - show the session, model, and directory\n/model [search] - select a model and variant\n/agent - select an agent\n/help - show this message\n\nTo answer a question, reply to its message. Permission buttons send decisions to OpenCode.\n\nThis is an unofficial community project. It is not affiliated with the OpenCode team.`
+const help = `**OpenCode Agent**\nSend a text request. New messages give instructions to the task in progress.\n\n/new [title] - create a session\n/sessions - select a previous bot session\n/stop - stop work in the selected session\n/status - show the session, model, and directory\n/model [search] - select a model and variant\n/agent - select an agent\n/update - update the application and OpenCode\n/help - show this message\n\nTo answer a question, reply to its message. Permission buttons send decisions to OpenCode.\n\nThis is an unofficial community project. It is not affiliated with the OpenCode team.`
 
 export function authorized(update: Update, ownerID: number): boolean {
   const message = update.message ?? update.callback_query?.message
@@ -34,6 +36,7 @@ export class Gateway {
   readonly telegram: Telegram
   readonly forms: Forms
   readonly pickers: Pickers
+  requestUpdate = startUpdate
   private mutex: Promise<unknown> = Promise.resolve()
   private dirty = true
   private known = new Set<string>()
@@ -121,6 +124,14 @@ export class Gateway {
     if (command) {
       const name = command[1]!.toLowerCase()
       const arg = command[2]?.trim() ?? ""
+      if (name === "update") {
+        const key = `update-job:${update.update_id}`
+        if (this.store.get(key)) return
+        const id = await this.telegram.send("Starting update.", undefined, `update:${update.update_id}`)
+        try { this.store.set(key, await this.requestUpdate(id)) }
+        catch (error) { await this.telegram.edit(id, errorText(error, [this.config.token])) }
+        return
+      }
       if (name === "start" || name === "help") { await this.telegram.send(help, undefined, `update:${update.update_id}`); return }
       if (name === "new") {
         await this.newSession(update.update_id, arg)
@@ -376,7 +387,7 @@ export class Gateway {
     }
   }
 
-  async run(signal: AbortSignal, reconnect: () => Promise<Client> = connect) {
+  async run(signal: AbortSignal, reconnect: () => Promise<Client> = connect, onReady?: () => Promise<void>) {
     const shutdown = new AbortController()
     signal = AbortSignal.any([signal, shutdown.signal])
     await this.initialize()
@@ -405,9 +416,11 @@ export class Gateway {
       }
     }
     const poll = async () => {
+      let ready = false
       while (!signal.aborted) {
         try {
           const updates = await this.api.getUpdates({ offset: this.store.get<number>("offset") ?? 0, timeout: 25, allowed_updates: ["message", "callback_query"] }, signal as Parameters<Api["getUpdates"]>[1])
+          if (!ready) { await onReady?.(); ready = true }
           for (const update of updates) {
             if (signal.aborted) break
             await this.exclusive(async () => {

@@ -28,8 +28,8 @@ The first version supports one owner on a Linux machine or virtual machine (VM).
 - Plain terminal setup with direct entry of your Telegram user ID.
 - A systemd user service for background operation.
 
-The runtime and official client both use version **2.0.8** of the experimental OpenCode V2 distribution.
-The V2 API can change. Test the runtime and client together when you update them.
+Initial setup uses OpenCode V2 **2.0.8** and the matching official client.
+The update command installs the latest V2 runtime and its matching client after application checks pass.
 
 ## Install
 
@@ -69,6 +69,7 @@ Tell the agent which repository or directory to use in your message.
 | `/status` | Show the directory, agent, model, and activity |
 | `/model [search]` | Select a model and model variant |
 | `/agent` | Select a primary agent |
+| `/update` | Update the application and OpenCode |
 | `/help` | Show the commands |
 
 To answer an agent question, reply to that question message or use its buttons.
@@ -88,12 +89,33 @@ Saved defaults remain available after a gateway restart.
 ```sh
 opencode-agent                         # Open the agent's OpenCode terminal interface
 opencode-agent setup                   # Run setup again
+opencode-agent update                  # Update the application and OpenCode
 opencode-agent gateway status          # Show the Telegram service status
 opencode-agent gateway restart         # Restart the Telegram service
 opencode-agent gateway logs            # Show the Telegram service logs
 opencode-agent doctor                  # Check OpenCode and Telegram
 opencode-agent opencode auth login     # Sign in to a model provider
 ```
+
+## Updates
+
+Run `opencode-agent update`, or send `/update` in Telegram.
+Both commands update the application from `main`, its dependencies, the installer, and the separate OpenCode V2 runtime.
+The installer also updates the private Bun runtime to the version selected by the project.
+
+The terminal shows progress as the update runs.
+Telegram uses one progress message, including the final result after a restart.
+The update worker runs separately from the gateway.
+It continues if the gateway stops or you close the terminal.
+
+The updater prepares and checks a new application directory before it stops the gateway.
+It restarts OpenCode only when the runtime version changes.
+A runtime restart can interrupt active tasks.
+An unchanged installation does not restart.
+
+Updates require an installed systemd user service.
+Configuration, credentials, sessions, and workspace files remain in the agent directory.
+See [Update](docs/installation.md#update) for details and recovery commands.
 
 ## Separate OpenCode installation
 

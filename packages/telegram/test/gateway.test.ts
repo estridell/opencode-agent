@@ -109,6 +109,28 @@ function picker(f: ReturnType<typeof fixture>) {
   return { text: String(entry.payload.text), messageID: entry.method === "sendMessage" ? index + 1 : Number(entry.payload.message_id), buttons: keyboard.flat() }
 }
 
+test("only the owner can start an update; replay keeps one progress message and one worker", async () => {
+  const f = fixture()
+  const requests: number[] = []
+  f.gateway.requestUpdate = async id => { requests.push(id!); return "job" }
+  await f.gateway.handle(message(1, "/update", 77))
+  expect(requests).toHaveLength(0)
+  await f.gateway.handle(message(2, "/update"))
+  await f.gateway.handle(message(2, "/update"))
+  expect(requests).toEqual([1])
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(1)
+  expect(f.calls).toHaveLength(0)
+})
+
+test("update launch failures replace the progress message", async () => {
+  const f = fixture()
+  f.gateway.requestUpdate = async () => { throw new Error("An update is already running.") }
+  await f.gateway.handle(message(1, "/update"))
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(1)
+  expect(picker(f).text).toBe("An update is already running.")
+  expect(f.calls).toHaveLength(0)
+})
+
 async function press(f: ReturnType<typeof fixture>, label: string, gateway = f.gateway) {
   const view = picker(f)
   const button = view.buttons.find(b => b.text === label)
