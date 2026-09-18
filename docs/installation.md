@@ -215,8 +215,9 @@ Push changes to `main` before updating the installed application.
 Uncommitted changes in a development checkout do not enter the update.
 
 The worker restarts OpenCode when the runtime version changes.
+Gateway startup also restarts OpenCode when it installs or updates the bundled context plugin.
 This restart can interrupt active tasks.
-Application-only updates restart the Telegram gateway while OpenCode continues to run.
+Other application updates restart the Telegram gateway while OpenCode continues to run.
 An unchanged installation reports that it is up to date without a restart.
 
 Updates require the systemd user service.
@@ -243,6 +244,19 @@ Local configuration, credentials, gateway data, sessions, and workspace files re
 
 For development, test runtime and client changes together with `bun run test:live` under a temporary `/tmp/opencode` directory.
 The initial runtime version comes from `packages/telegram/package.json`.
+
+The application context note is in `packages/plugins/context.ts`.
+After an update, the next agent request receives the note in existing and new Telegram sessions.
+The note also applies to their child sessions.
+
+To test plugin activation and outgoing system instructions with a temporary runtime, run:
+
+```sh
+OPENCODE_AGENT_HOME=/tmp/opencode/agent-context-check bun run test:context
+```
+
+The test uses a local simulated model endpoint and separate OpenCode data.
+It checks session scope, preserved base prompts, repeated requests, and activation after an OpenCode restart.
 
 To test runtime replacement with temporary data, run:
 

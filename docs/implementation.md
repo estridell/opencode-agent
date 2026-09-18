@@ -27,7 +27,7 @@ The owner can specify a repository in a normal text message.
 ## Separate gateway process
 
 The V2 client provides session, event, permission, form, model, and service APIs.
-The gateway uses these APIs without an OpenCode plugin.
+The gateway uses these APIs for transport and session control.
 Its process controls the Telegram connection independently of plugins that load for each working directory.
 OpenCode supplies the agent loop, provider support, and tool execution.
 
@@ -50,6 +50,30 @@ Separate file paths alone do not prevent a port conflict.
 The command `opencode-agent opencode <args>` uses the same separate environment.
 OpenCode controls provider sign-in, models, permissions, plugins, tools, and agent behavior.
 OpenCode still reads configuration from working repositories.
+
+## Application context plugin
+
+`packages/plugins/context.ts` exports the `opencode-agent.context` plugin.
+It appends a short application note through the V2 `context` hook before each agent-loop model request.
+The note describes a general-purpose assistant that communicates through Telegram and operates on the configured agent machine.
+It preserves all upstream model-specific instructions and any custom agent system prompt.
+The plugin registers no tools and does not add conversation messages.
+
+The plugin checks session metadata for `source: "opencode-agent"` and `transport: "telegram"`.
+It follows parent session IDs so child agents receive the same context.
+Unrelated sessions do not receive the note.
+Each outgoing request receives at most one copy.
+Title, compaction, and transient generation requests retain their existing instructions.
+
+Startup copies the self-contained TypeScript file to the separate runtime's global plugin directory.
+The destination is `runtime/config/opencode/plugins/opencode-agent-context.ts` under the agent directory.
+The installer compares file contents and replaces a changed copy atomically.
+Startup then stops the owned OpenCode service so the next connection loads the new plugin.
+An unchanged plugin does not trigger a restart.
+This startup path also activates the plugin when an older updater installs this application version.
+
+The official plugin package supplies development types; its version follows the runtime and client during updates.
+The deployed file has no runtime imports or dependencies.
 
 ## Gateway data
 
@@ -178,7 +202,7 @@ The worker runs independently of the gateway service and the terminal.
 
 Each update clones `main` into a new application directory.
 It resolves the latest V2 release through the upstream update API.
-It selects that exact `@opencode/client` version in the prepared copy.
+It selects that exact version for `@opencode/client` and the `@opencode/plugin` development types in the prepared copy.
 It installs dependencies and runs type checks and tests before stopping the gateway.
 Repository dependency versions otherwise follow the committed lockfile.
 The installer selects the Bun version and regenerates the launcher.
@@ -203,7 +227,6 @@ Previous application directories remain on disk.
 ### Open questions
 
 - Define retention limits for application directories and update logs.
-- Add plugin activation steps when the first plugin is implemented.
 
 ## API versions
 
@@ -221,7 +244,7 @@ The live test checks the API with a real, separate V2 service.
 
 - Input supports text and images. Audio, video, PDF, and other document formats are not supported.
 - Text formatting supports bold text, inline code, and code blocks. Other Markdown stays as text.
-- There are no additional memory, scheduling, or personal-agent plugins.
+- There are no memory or scheduling plugins.
 - Session selection shows sessions from this bot only.
 - Each installation supports one owner.
 - Background installation supports Linux systemd user services.

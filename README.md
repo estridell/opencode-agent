@@ -27,6 +27,7 @@ The first version supports one owner on a Linux machine or virtual machine (VM).
 - Model, model variant, and agent selection in a single message, with optional defaults for new sessions.
 - Plain terminal setup with direct entry of your Telegram user ID.
 - A systemd user service for background operation.
+- A short general-purpose assistant context added to OpenCode's model-specific instructions.
 
 Initial setup uses OpenCode V2 **2.0.8** and the matching official client.
 The update command installs the latest V2 runtime and its matching client after application checks pass.
@@ -122,7 +123,7 @@ The update worker runs separately from the gateway.
 It continues if the gateway stops or you close the terminal.
 
 The updater prepares and checks a new application directory before it stops the gateway.
-It restarts OpenCode only when the runtime version changes.
+It restarts OpenCode when the runtime version or bundled context plugin changes.
 A runtime restart can interrupt active tasks.
 An unchanged installation does not restart.
 
@@ -153,7 +154,9 @@ It uses long polling to get Telegram messages through outbound requests.
 It does not require a public inbound network endpoint.
 
 OpenCode controls models, providers, tools, sessions, permissions, MCP, file access, and agent execution.
-Small plugins can add personal-agent functions when required.
+The bundled context plugin describes the general-purpose assistant role, Telegram connection, and agent machine.
+It appends these instructions for gateway sessions and their child sessions through OpenCode's `context` hook.
+The source text is in [`packages/plugins/context.ts`](packages/plugins/context.ts).
 See [Implementation](docs/implementation.md) for the design and current limits.
 
 ## Repository
@@ -164,7 +167,7 @@ See [Implementation](docs/implementation.md) for the design and current limits.
 | `config/` | Configuration example |
 | `docs/` | Installation and design documentation |
 | `packages/telegram/` | Terminal commands, setup, and Telegram gateway |
-| `packages/plugins/` | Directory for future plugins |
+| `packages/plugins/` | Application context plugin |
 | `scripts/` | Notes about script commands |
 
 ## Development

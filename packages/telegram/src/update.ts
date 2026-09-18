@@ -147,8 +147,14 @@ export async function runUpdate(id: string, messageID?: number) {
         const clientChanged = manifest.dependencies["@opencode/client"] !== version
         manifest.dependencies["@opencode/client"] = version
         if (clientChanged) await writeFile(packageFile, JSON.stringify(manifest, null, 2) + "\n")
+        const rootPackageFile = join(stage, "package.json")
+        const rootManifest = await Bun.file(rootPackageFile).json()
+        const pluginChanged = rootManifest.devDependencies?.["@opencode/plugin"] !== version
+        rootManifest.devDependencies ??= {}
+        rootManifest.devDependencies["@opencode/plugin"] = version
+        if (pluginChanged) await writeFile(rootPackageFile, JSON.stringify(rootManifest, null, 2) + "\n")
         await report(`Installing dependencies and OpenCode client ${version}.`)
-        await run([process.execPath, "install", ...(clientChanged ? [] : ["--frozen-lockfile"])], stage)
+        await run([process.execPath, "install", ...(clientChanged || pluginChanged ? [] : ["--frozen-lockfile"])], stage)
         await report("Checking the application.")
         await run([process.execPath, "run", "check"], stage)
         await run([process.execPath, "test"], stage)
@@ -158,7 +164,7 @@ export async function runUpdate(id: string, messageID?: number) {
         }
       },
       stop: async () => {
-        await report(runtimeChanged ? "Restarting the gateway and OpenCode. Active tasks can be interrupted." : "Restarting the Telegram gateway.")
+        await report(runtimeChanged ? "Restarting the gateway and OpenCode. Active tasks can be interrupted." : "Restarting the Telegram gateway. Plugin changes can also restart OpenCode.")
         stopped = true
         await run(["systemctl", "--user", "stop", unitName])
         // Also wait for the child to release the gateway lock before touching files.

@@ -7,6 +7,7 @@
     "check": "tsc --noEmit",
     "test": "bun test",
     "test:live": "bun run packages/telegram/test/live.ts",
+    "test:context": "bun run packages/telegram/test/context-live.ts",
     "test:runtime-update": "bun run packages/telegram/test/runtime-update-live.ts",
     "test:telegram": "bun run packages/telegram/test/telegram-live.ts",
     "test:images": "bun run packages/telegram/test/images-live.ts",
@@ -14,6 +15,7 @@
     "service:install": "bun run packages/telegram/src/main.ts gateway install"
   },
   "devDependencies": {
+    "@opencode/plugin": "2.0.8",
     "@types/bun": "^1.3.14",
     "typescript": "^5.9.3"
   }
