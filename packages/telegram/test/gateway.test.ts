@@ -8,6 +8,7 @@ import { formatText } from "../src/format"
 import { runtimeEnv, registrationFile } from "../src/runtime"
 import { parseAnswer, visible } from "../src/forms"
 import { systemdQuote } from "../src/service"
+import { parseConfig } from "../src/config"
 
 const stores: Store[] = []
 afterEach(() => { for (const store of stores.splice(0)) store.close() })
@@ -56,7 +57,7 @@ function fixture() {
       sessions.get(sessionID)!.agent = body.agent
       return new Response(null, { status: 204 })
     }
-    else if (path === "/api/session") { data = { data: [], cursor: {} }; raw = true }
+    else if (path === "/api/session") { data = { data: [...sessions.values()].filter(s => s.parentID === url.searchParams.get("parentID")), cursor: {} }; raw = true }
     else if (/\/prompt$/.test(path)) {
       admissions.add(body.id)
       if (failAdmission) { failAdmission = false; throw new Error("Simulated connection reset after admission") }
@@ -330,6 +331,7 @@ test("reconciliation catches up paginated completed responses without replaying 
 
 test("permission decisions are upstream-native and stale buttons cannot grant access", async () => {
   const f = fixture()
+  f.gateway.config.autoApprove = false
   const id = await f.gateway.newSession(1)
   f.permissions.set(id, [{ id: "per_1", sessionID: id, action: "shell", resources: ["git push"], save: ["git push *"] }])
   await f.gateway.reconcile()
@@ -340,6 +342,43 @@ test("permission decisions are upstream-native and stale buttons cannot grant ac
   await f.gateway.callback(action)
   expect(f.calls.filter(c => c.path.endsWith("/permission/per_1/reply"))).toHaveLength(1)
   expect(f.calls.find(c => c.path.endsWith("/permission/per_1/reply"))!.body).toEqual({ decision: "once" })
+})
+
+test("existing configurations default to auto-approve and accept an explicit opt-out", () => {
+  const config = { token: "999:fake", ownerID: 42, directory: "/agent/workspace" }
+  expect(parseConfig(config).autoApprove).toBe(true)
+  expect(parseConfig({ ...config, autoApprove: false }).autoApprove).toBe(false)
+  expect(() => parseConfig({ ...config, autoApprove: "false" })).toThrow("autoApprove must be true or false")
+})
+
+test("auto-approve handles parent and child requests once without Telegram prompts", async () => {
+  const f = fixture()
+  const id = await f.gateway.newSession(1)
+  const child = { ...f.sessions.get(id)!, id: "ses_child", parentID: id }
+  f.sessions.set(child.id, child)
+  for (const sessionID of [id, child.id]) {
+    f.permissions.set(sessionID, [{ id: `per_${sessionID}`, sessionID, action: "shell", resources: ["git status"], save: ["git *"] }])
+  }
+  await f.gateway.reconcile()
+  await f.gateway.reconcile()
+  const replies = f.calls.filter(c => /\/permission\/.*\/reply$/.test(c.path))
+  expect(replies).toHaveLength(2)
+  expect(replies.map(c => c.body)).toEqual([{ decision: "once" }, { decision: "once" }])
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(0)
+})
+
+test("auto-approve resolves previously displayed requests after gateway reconstruction", async () => {
+  const f = fixture()
+  f.gateway.config.autoApprove = false
+  const id = await f.gateway.newSession(1)
+  f.permissions.set(id, [{ id: "per_old", sessionID: id, action: "shell", resources: ["git status"], save: ["git *"] }])
+  await f.gateway.reconcile()
+  const restored = new Gateway({ ...f.gateway.config, autoApprove: true }, f.store, f.gateway.client, f.gateway.api, 0)
+  await restored.reconcile()
+  await restored.reconcile()
+  expect(f.calls.filter(c => c.path.endsWith("/permission/per_old/reply"))).toHaveLength(1)
+  expect(picker(f).text).toBe("Permission resolved in OpenCode.")
+  expect(picker(f).buttons).toHaveLength(0)
 })
 
 test("structured questions survive gateway reconstruction and submit a complete typed answer", async () => {

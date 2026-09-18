@@ -364,6 +364,14 @@ export class Gateway {
           this.store.delete(`permission:${old}`)
         }
         for (const p of permissions) {
+          if (this.config.autoApprove !== false) {
+            try { await this.client.permission.reply({ sessionID: session.id, requestID: p.id, decision: "once" }) }
+            catch (error) {
+              // Another client may have answered it after the pending-request query.
+              if (!isNotFound(error)) throw error
+            }
+            continue
+          }
           if (this.store.get(`permission:${p.id}`)) continue
           const rows = [[this.button("Allow once", { kind: "permission", sessionID: session.id, id: p.id, value: "once" }), this.button("Reject", { kind: "permission", sessionID: session.id, id: p.id, value: "reject" })]]
           rows.push([this.button("Always allow", { kind: "permission", sessionID: session.id, id: p.id, value: "always" })])

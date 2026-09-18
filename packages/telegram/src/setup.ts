@@ -50,7 +50,7 @@ export async function setup() {
   try {
     const binding = `${bot.id}:${ownerID}`
     if (store.get("binding") && store.get("binding") !== binding) throw new Error("This installation uses a different bot or owner. Set OPENCODE_AGENT_HOME to a different directory.")
-    await saveConfig({ token, ownerID, directory })
+    await saveConfig({ token, ownerID, directory, autoApprove: existing?.autoApprove ?? true })
     store.set("binding", binding)
   } finally { store.close() }
   console.log(`Configuration saved: ${configPath()}`)

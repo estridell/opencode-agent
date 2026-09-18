@@ -16,7 +16,7 @@ It uses an unchanged upstream OpenCode V2 runtime in a separate installation.
 | Interruption | The upstream session interrupt API |
 | Output | Completed assistant messages and a temporary Telegram typing indicator |
 | Questions | OpenCode forms with buttons or text replies |
-| Permissions | OpenCode permission requests and decisions |
+| Permissions | Automatic one-time approval by default; optional manual decisions |
 | Models | Model, variant, and agent selection, with optional defaults for new bot sessions |
 | Setup | Plain terminal prompts and direct Telegram user-ID entry |
 | Background operation | A systemd user service |
@@ -118,6 +118,14 @@ Stable OpenCode input IDs prevent this delivery problem from repeating the agent
 ## Permissions and questions
 
 Before it sends a permission decision, the gateway checks that the request is still pending.
+The gateway approves pending requests with `once` unless `autoApprove` is false in the gateway configuration.
+This default also applies when the configuration does not contain the setting.
+It covers tracked bot sessions and their child sessions, including requests found after a restart.
+It does not save permanent rules or override OpenCode deny rules.
+Failed requests remain available for the next reconciliation attempt.
+Automatic approvals do not add Telegram messages.
+
+When automatic approval is disabled, the gateway shows permission buttons.
 Buttons send the upstream `once`, `always`, or `reject` decision.
 The message shows the requested resources and available patterns for saved permissions.
 OpenCode controls the effect and storage of the decision.
@@ -194,7 +202,7 @@ The live test checks the API with a real, separate V2 service.
 - Session selection shows sessions from this bot only.
 - Each installation supports one owner.
 - Background installation supports Linux systemd user services.
-- Parent agents summarize child-agent responses. Child permission requests and questions are sent to the owner.
+- Parent agents summarize child-agent responses. Child permissions use the configured approval mode; child questions go to the owner.
 
 ## References
 

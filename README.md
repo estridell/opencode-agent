@@ -23,7 +23,7 @@ The first version supports one owner on a Linux machine or virtual machine (VM).
 - New messages that change the instructions for a task in progress.
 - Saved sessions with commands to create, select, and stop them.
 - Agent responses with a temporary Telegram typing indicator during work.
-- Permission buttons and questions with buttons or text answers.
+- Automatic permission approval, optional permission buttons, and questions with buttons or text answers.
 - Model, model variant, and agent selection in a single message, with optional defaults for new sessions.
 - Plain terminal setup with direct entry of your Telegram user ID.
 - A systemd user service for background operation.
@@ -83,6 +83,12 @@ Model and agent selection asks: **Set as default for new sessions?**
 Select **Yes** to use that choice for future bot sessions, including the selected model variant.
 Select **No** to change only the current session.
 Saved defaults remain available after a gateway restart.
+
+The gateway automatically approves pending permission requests for bot sessions and their child sessions.
+Each approval uses **Allow once**. It does not save a permanent permission rule.
+Explicit OpenCode deny rules still apply. Questions still require your answer.
+To use permission buttons, set `"autoApprove": false` in `~/.opencode-agent/config.json`.
+Restart the gateway after this change.
 
 ## Use the terminal
 

@@ -116,6 +116,12 @@ The service installer creates one `opencode-agent.service` for each Linux user.
 See [`config/telegram.example.json`](../config/telegram.example.json) for a configuration example.
 Use setup to check the bot token and user ID format.
 
+The gateway automatically approves pending permission requests by default.
+It uses one-time approvals for bot sessions and their child sessions.
+OpenCode deny rules still apply. Agent questions still require an answer.
+Set `"autoApprove": false` in `config.json` to use manual permission buttons.
+Restart the gateway after changing this setting.
+
 ## Background service
 
 systemd controls the background Telegram service.
@@ -252,6 +258,8 @@ It does not call a model or use the installed bot.
 ## Acceptance test
 
 Configure a real Telegram bot and sign in to a model provider before this test.
+Set `"autoApprove": false` before testing the manual permission buttons below.
+Restart the gateway after this change.
 
 1. Send `/start`.
 2. Ask the agent to list the working directory.
@@ -277,6 +285,10 @@ Configure a real Telegram bot and sign in to a model provider before this test.
 22. Select **Yes** when asked to save the default.
 23. Send `/new`, then `/status`, to check the saved model and variant.
 24. Repeat with **No** to check that the saved default stays unchanged.
+25. Set `"autoApprove": true`.
+26. Restart the gateway.
+27. Request an action that requires permission under an `ask` rule.
+28. Check that the action continues without a permission message.
 
 Automated tests use a simulated Telegram API.
 The live API test uses a real temporary V2 service without a model provider call.
