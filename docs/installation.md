@@ -238,6 +238,17 @@ Local configuration, credentials, gateway data, sessions, and workspace files re
 For development, test runtime and client changes together with `bun run test:live` under a temporary `/tmp/opencode` directory.
 The initial runtime version comes from `packages/telegram/package.json`.
 
+To test runtime replacement with temporary data, run:
+
+```sh
+OPENCODE_AGENT_HOME=/tmp/opencode/agent-runtime-update bun run test:runtime-update
+```
+
+Use a new temporary directory for each run.
+The test installs V2 2.0.7, creates a session, and updates to the repository's selected version.
+It checks that the session remains available after restart.
+It does not call a model or use the installed bot.
+
 ## Acceptance test
 
 Configure a real Telegram bot and sign in to a model provider before this test.
