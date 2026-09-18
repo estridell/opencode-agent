@@ -291,7 +291,8 @@ The task list includes its next run and the last submission state or error.
 
 `opencode-agent config get [key]` displays settings with credentials hidden.
 `opencode-agent config set <key> <value>` validates and atomically saves one change.
-The existing `flock` system dependency protects concurrent setters across processes.
+The existing `flock` system dependency protects setup saves and configuration setters across processes.
+Each update reads the latest configuration under the lock. Setup merges only the fields collected from its prompts.
 The setter rejects bot-token and owner changes. Setup handles those fields and the gateway identity check.
 The gateway reloads memory, voice, timezone, progress, and scheduler settings during operation.
 Bot identity, default directory, and automatic-approval changes require a gateway restart.

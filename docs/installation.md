@@ -143,7 +143,7 @@ opencode-agent config set progress false
 ```
 
 The commands validate changes and replace the configuration file atomically.
-A file lock prevents parallel configuration commands from overwriting each other's changes.
+A file lock prevents setup and parallel configuration commands from overwriting each other's changes.
 Configuration output hides the Telegram token.
 The configuration setter does not change the bot token or owner. Use setup for those fields.
 Memory, timezone, progress, voice settings, and scheduler enablement reload automatically.

@@ -34,7 +34,7 @@ export async function assistantContext(home = agentHome()) {
     `Agent command: ${join(home, "bin", "opencode-agent")}`,
     `Timezone: ${settings.timezone}`,
     `Current time: ${new Date().toISOString()}`,
-    "Use opencode-agent config get to inspect project settings. Use config set <key> <value> to change one setting.",
+    "Use opencode-agent config get to inspect project settings. Use opencode-agent config set <key> <value> to change one setting.",
     "Use opencode-agent opencode <args> for native OpenCode commands in this installation.",
     "Load the opencode-agent skill before configuring or troubleshooting this installation.",
     `Scheduled tasks: ${settings.schedules.enabled ? "enabled while the Telegram gateway runs" : "disabled"}. Missed runs are skipped.`,

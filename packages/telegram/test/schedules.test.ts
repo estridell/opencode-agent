@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { nextRun, Schedules, type JobInput } from "../src/schedules"
 
@@ -26,6 +26,7 @@ test("DST changes never return an overdue recurrence", () => {
 })
 
 test("restart skips overdue tasks and retains pending submissions with stable IDs", async () => {
+  await mkdir("/tmp/opencode", { recursive: true })
   const home = await mkdtemp("/tmp/opencode/agent-schedule-test-")
   let jobs = new Schedules(join(home, "jobs.sqlite"))
   try {
@@ -82,6 +83,7 @@ test.each(["pause", "remove", "update"])("%s cancels pending submissions, includ
 })
 
 test("concurrent handles cannot claim separate runs for one occurrence", async () => {
+  await mkdir("/tmp/opencode", { recursive: true })
   const home = await mkdtemp("/tmp/opencode/agent-schedule-lock-test-")
   const a = new Schedules(join(home, "jobs.sqlite"))
   const b = new Schedules(join(home, "jobs.sqlite"))

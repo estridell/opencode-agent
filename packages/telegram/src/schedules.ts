@@ -29,18 +29,17 @@ export function nextRun(schedule: Schedule, timezone: string, after: number): nu
     return value > after ? value : null
   }
   if (typeof schedule.cron !== "string" || schedule.cron.trim().split(/\s+/).length !== 5) throw new Error("Use a five-field cron expression: minute hour day month weekday.")
-  try {
-    const cron = new Cron(schedule.cron, { timezone, paused: true })
-    // During a repeated DST hour, Croner can resolve a wall time into the past.
-    // Advance through that repeated hour; a returned occurrence must be in the future.
-    for (let minutes = 0; minutes <= 180; minutes++) {
-      const next = cron.nextRun(new Date(after + minutes * 60_000))?.getTime()
-      if (next === undefined) return null
-      if (next > after) return next
-    }
-    throw new Error("No future occurrence after the timezone transition.")
-  }
+  let cron: Cron
+  try { cron = new Cron(schedule.cron, { timezone, paused: true }) }
   catch { throw new Error("Invalid cron expression or timezone.") }
+  // During a repeated DST hour, Croner can resolve a wall time into the past.
+  // Advance through that repeated hour; a returned occurrence must be in the future.
+  for (let minutes = 0; minutes <= 180; minutes++) {
+    const next = cron.nextRun(new Date(after + minutes * 60_000))?.getTime()
+    if (next === undefined) return null
+    if (next > after) return next
+  }
+  throw new Error("No future occurrence after the timezone transition.")
 }
 
 function validate(input: JobInput, now: number): JobInput {

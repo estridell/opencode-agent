@@ -10,7 +10,7 @@ import { parseAnswer, visible } from "../src/forms"
 import { systemdQuote } from "../src/service"
 import { parseConfig } from "../src/config"
 import { imageLimit, imageType } from "../src/images"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { Schedules } from "../src/schedules"
 
@@ -136,6 +136,7 @@ function fixture() {
       : ["sendMessage", "sendDocument", "sendPhoto"].includes(method) ? { message_id: telegram.length, date: 0, chat: { id: 42, type: "private" }, text: "" } : true
     return { ok: true, result } as never
   })
+  mkdirSync("/tmp/opencode", { recursive: true })
   const home = mkdtempSync("/tmp/opencode/agent-gateway-test-")
   homes.push(home)
   const gateway = new Gateway({ token: "999:fake", ownerID: 42, directory: "/agent/workspace" }, store, client, api, 0, home)
@@ -220,7 +221,7 @@ test("oversized images are rejected before download and while reading an undecla
 test("image download failures can retry and never expose the token", async () => {
   const f = fixture()
   f.gateway.images.fetchFile = Object.assign(async () => { throw new Error("https://api.telegram.org/file/bot999:fake/image") }, { preconnect: fetch.preconnect })
-  await expect(f.gateway.handle(photo(1))).rejects.toThrow("Image download connection failed")
+  await expect(f.gateway.handle(photo(1))).rejects.toThrow("Attachment download connection failed")
   expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(0)
   f.gateway.images.fetchFile = Object.assign(async () => new Response(png), { preconnect: fetch.preconnect })
   await f.gateway.handle(photo(1))
@@ -577,6 +578,11 @@ test("usage distinguishes cumulative totals from the latest request context", as
   await f.gateway.handle(message(2, "/usage"))
   expect(picker(f).text).toContain("input 50000")
   expect(picker(f).text).toContain("1650 tokens (2% of 100000)")
+  const latest = f.messages.get(id)![0]!
+  latest.tokens = { input: 1000 } as SessionMessageAssistant["tokens"]
+  expect(await f.gateway.usage(id)).toContain("1000 tokens (1% of 100000)")
+  latest.tokens = { input: 1000, cache: { write: 500 } } as SessionMessageAssistant["tokens"]
+  expect(await f.gateway.usage(id)).toContain("1500 tokens (2% of 100000)")
   await f.gateway.handle(message(3, "/compact"))
   const request = f.calls.find(c => c.path.endsWith("/compact"))!
   expect(request.body).toEqual({ id: "msg_tg_compact_42_3", delivery: "queue" })
@@ -613,6 +619,28 @@ test("recurring jobs skip a new occurrence while their previous session is activ
     f.running[first.sessionID] = { type: "running" }
     await f.gateway.runScheduled(jobs)
     expect(jobs.get(job.id).last).toMatchObject({ state: "skipped", sessionID: first.sessionID })
+    expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(0)
+  } finally { jobs.close() }
+})
+
+test("disabling schedules after a claim removes that run before scheduling resumes", async () => {
+  const f = fixture()
+  const jobs = new Schedules(":memory:")
+  try {
+    const now = Date.now()
+    const job = jobs.create({ name: "Report", prompt: "Send my report.", schedule: { at: new Date(now - 1000).toISOString() }, timezone: "UTC", directory: "/work" }, now - 2000)
+    const create = f.gateway.client.session.create
+    f.gateway.client.session.create = async (...args) => {
+      const session = await create(...args)
+      f.gateway.settings.schedules.enabled = false
+      return session
+    }
+    await f.gateway.runScheduled(jobs)
+    expect(jobs.pending()).toHaveLength(0)
+    expect(jobs.get(job.id).last?.state).toBe("skipped")
+    f.gateway.settings.schedules.enabled = true
+    jobs.skipMissed()
+    await f.gateway.runScheduled(jobs)
     expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(0)
   } finally { jobs.close() }
 })

@@ -274,7 +274,7 @@ export class Gateway {
     const latest = [...context].reverse().find(m => m.type === "assistant" && m.tokens)
     if (latest?.type === "assistant" && latest.tokens) {
       const t = latest.tokens
-      const used = t.input + t.output + t.reasoning + t.cache.read + t.cache.write
+      const used = (t.input ?? 0) + (t.output ?? 0) + (t.reasoning ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
       const model = (await this.client.model.list({ location: session.location })).data.find(m => m.providerID === latest.model.providerID && m.id === latest.model.id)
       lines.push(`Last request context estimate: ${used} tokens${model?.limit.context ? ` (${Math.round(used / model.limit.context * 100)}% of ${model.limit.context})` : ""}.`)
     } else lines.push("Context estimate is not available yet.")
@@ -532,7 +532,8 @@ export class Gateway {
           session = await this.client.session.create(jobSession(run))
         }
         this.track(session)
-        if (!jobs.current(run) || !this.settings.schedules.enabled) continue
+        if (!jobs.current(run)) continue
+        if (!this.settings.schedules.enabled) { jobs.skipOverlap(run); continue }
         const messageID = `msg_schedule_${run.id}`
         this.store.set(`last-input:${session.id}`, messageID)
         await this.client.session.prompt({ sessionID: session.id, id: messageID, text: run.job.prompt, metadata: { transport: "telegram", scheduleID: run.job.id, scheduledAt: run.due } })

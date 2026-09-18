@@ -1,7 +1,7 @@
 import { homedir } from "node:os"
 import { resolve, join, dirname } from "node:path"
 import { mkdir, readFile } from "node:fs/promises"
-import { writeAtomic } from "./files"
+import { optionalText, writeAtomic } from "./files"
 import { defaultVoiceSettings, parseVoiceSettings, type VoiceSettings } from "./voice"
 
 /** The HOME/XDG fallback also supports a managed V2 service started before this environment variable was added. */
@@ -34,6 +34,10 @@ export function defaultSettings(): Settings {
 export function parseSettings(value: Record<string, unknown>): Settings {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid project settings.")
   const defaults = defaultSettings()
+  const keys = new Set([...Object.keys(defaults), "token", "ownerID", "directory", "autoApprove"])
+  for (const key of Object.keys(value)) {
+    if (!keys.has(key)) throw new Error(`Unknown setting: ${key}.`)
+  }
   const result = { ...defaults, ...value } as Settings
   for (const section of ["memory", "schedules", "voice"] as const) {
     const input = value[section]
@@ -75,9 +79,18 @@ export async function loadConfig(): Promise<Config> {
 }
 
 export async function saveConfig(config: Config) {
-  const parsed = parseConfig(config)
-  await mkdir(agentHome(), { recursive: true, mode: 0o700 })
-  await writeAtomic(configPath(), JSON.stringify(parsed, null, 2) + "\n")
+  return updateConfig(current => ({ ...current, ...config }))
+}
+
+/** Apply a mutation to the latest configuration while holding the shared writer lock. */
+export async function updateConfig(update: (current: Config | undefined) => Config) {
+  return lockedConfig(async () => {
+    const text = await optionalText(configPath())
+    const current = text === undefined ? undefined : parseConfig(JSON.parse(text))
+    const parsed = parseConfig(update(current))
+    await writeAtomic(configPath(), JSON.stringify(parsed, null, 2) + "\n")
+    return parsed
+  })
 }
 
 /** Settings also work before Telegram setup, for the managed terminal interface. */
@@ -111,13 +124,17 @@ async function lockedConfig<T>(work: () => Promise<T>): Promise<T> {
 export async function configure(action: string, key?: string, raw?: string) {
   if (action === "set") {
     if (key === "token" || key === "ownerID") throw new Error("Run opencode-agent setup to change the bot token or owner.")
-    return lockedConfig(() => configureValue(action, key, raw))
+    await updateConfig(current => {
+      if (!current) throw new Error("Run opencode-agent setup first.")
+      configureValue(current, action, key, raw)
+      return current
+    })
+    return `Setting saved: ${key}.`
   }
-  return configureValue(action, key, raw)
+  return configureValue(await loadConfig(), action, key, raw)
 }
 
-async function configureValue(action: string, key?: string, raw?: string) {
-  const config = await loadConfig()
+function configureValue(config: Config, action: string, key?: string, raw?: string) {
   const publicConfig = { ...config, token: "[redacted]" }
   if (action === "get" && !key) return publicConfig
   const parts = key?.split(".") ?? []
@@ -131,8 +148,6 @@ async function configureValue(action: string, key?: string, raw?: string) {
   try { value = JSON.parse(raw) } catch { /* Plain strings need no JSON quotes. */ }
   const target = parts.length === 1 ? config : config[parts[0]! as keyof Config]
   ;(target as Record<string, unknown>)[leaf] = value
-  await saveConfig(config)
-  return `Setting saved: ${key}.`
 }
 
 // Never include credentials or HTTP request bodies in gateway logs.

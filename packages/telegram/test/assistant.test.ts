@@ -1,11 +1,14 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { assistantContext, prepareMemory } from "../src/assistant"
-import { configure, loadConfig, loadSettings, managedHome, saveConfig } from "../src/config"
+import { configure, loadConfig, loadSettings, managedHome, parseSettings, saveConfig, updateConfig } from "../src/config"
+import { writeAtomic } from "../src/files"
+import { prepareRuntime } from "../src/runtime"
 import { cacheAttachment, responseAttachments } from "../src/attachments"
 
 async function withHome(work: (home: string) => Promise<void>) {
+  await mkdir("/tmp/opencode", { recursive: true })
   const home = await mkdtemp("/tmp/opencode/agent-assistant-test-")
   const original = process.env.OPENCODE_AGENT_HOME
   process.env.OPENCODE_AGENT_HOME = home
@@ -46,6 +49,49 @@ test("parallel configuration setters preserve each independent change", async ()
       configure("set", "timezone", "Europe/Stockholm"),
     ])
     expect(await loadConfig()).toMatchObject({ progress: false, memory: { maxChars: 1700 }, timezone: "Europe/Stockholm" })
+  })
+})
+
+test("setup saves only its fields and shares the lock with configuration setters", async () => {
+  await withHome(async () => {
+    await saveConfig({ token: "999:secret", ownerID: 42, directory: "/old" })
+    const setupFields = { token: "999:secret", ownerID: 42, directory: "/new" }
+    await configure("set", "autoApprove", "false")
+    await Promise.all([
+      saveConfig(setupFields),
+      configure("set", "progress", "false"),
+      updateConfig(current => ({ ...current!, timezone: "Europe/Stockholm" })),
+    ])
+    expect(await loadConfig()).toMatchObject({ ...setupFields, autoApprove: false, progress: false, timezone: "Europe/Stockholm" })
+  })
+})
+
+test("configuration validation rejects unknown keys and preserves malformed files", async () => {
+  expect(() => parseSettings({ progess: false })).toThrow("Unknown setting: progess")
+  expect(() => parseSettings({ memory: { maxChar: 100 } })).toThrow("Unknown setting: memory.maxChar")
+  expect(parseSettings({ token: "999:secret", ownerID: 42, directory: "/work", autoApprove: false }).progress).toBe(true)
+  await withHome(async home => {
+    const path = join(home, "config.json")
+    await writeFile(path, '{"progess": false}')
+    await expect(saveConfig({ token: "999:secret", ownerID: 42, directory: "/work" })).rejects.toThrow()
+    expect(await readFile(path, "utf8")).toBe('{"progess": false}')
+  })
+})
+
+test("runtime preparation installs an executable launcher and keeps data writes private", async () => {
+  await withHome(async home => {
+    await prepareRuntime()
+    const launcher = join(home, "bin/opencode-agent")
+    expect((await stat(launcher)).mode & 0o777).toBe(0o700)
+    await chmod(launcher, 0o600)
+    await prepareRuntime()
+    expect((await stat(launcher)).mode & 0o777).toBe(0o700)
+    const child = Bun.spawn([launcher, "--help"], { stdout: "pipe", stderr: "pipe" })
+    expect(await child.exited).toBe(0)
+    expect(await new Response(child.stdout).text()).toContain("OpenCode Agent")
+    const data = join(home, "private.json")
+    await writeAtomic(data, "{}")
+    expect((await stat(data)).mode & 0o777).toBe(0o600)
   })
 })
 

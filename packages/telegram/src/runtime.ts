@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { mkdir, access, chmod } from "node:fs/promises"
+import { mkdir, access, stat } from "node:fs/promises"
 import { createServer } from "node:net"
 import { agentHome } from "./config"
 import manifest from "../package.json"
@@ -50,9 +50,9 @@ export async function prepareRuntime() {
     process.env[key] === undefined ? `unset ${key}` : `export ${key}=${quote(process.env[key]!)}`,
   ).join("\n")
   const text = `#!/bin/sh\nexport OPENCODE_AGENT_HOME=${quote(agentHome())}\n${management}\nexec ${quote(process.execPath)} ${quote(installedCliPath())} "$@"\n`
-  if (previous !== text && !(process.env.HOME === runtimeHome() && previous)) {
-    await writeAtomic(launcher, text)
-    await chmod(launcher, 0o700)
+  const content = process.env.HOME === runtimeHome() && previous ? previous : text
+  if (previous !== content || ((await stat(launcher)).mode & 0o777) !== 0o700) {
+    await writeAtomic(launcher, content, 0o700)
   }
 }
 
