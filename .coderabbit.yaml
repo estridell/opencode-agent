@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Reference: https://docs.coderabbit.ai/reference/configuration
+reviews:
+  profile: "chill"
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+  finishing_touches:
+    docstrings:
+      enabled: false
+  path_instructions:
+    - path: "**/*"
+      instructions: >-
+        Review documentation for useful explanations of behavior and constraints.
+        Request comments for non-obvious contracts, concurrency, retries, recovery, and runtime isolation.
+        Do not request docstrings solely to meet coverage targets or repeat clear function names.
