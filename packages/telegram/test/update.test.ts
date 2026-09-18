@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, readlink, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { applyUpdate, command, releaseVersion } from "../src/update"
+import { applyUpdate, command, pluginOnlyUpdate, releaseVersion } from "../src/update"
 
 function steps(fail?: string) {
   const calls: string[] = []
@@ -36,6 +36,63 @@ test("successful updates require the post-restart connection check", async () =>
   const plan = steps()
   expect(await applyUpdate(plan)).toBe(true)
   expect(plan.calls).toEqual(["prepare", "stop", "activate", "start", "verify"])
+})
+
+test("plugin-only updates verify health without calling gateway lifecycle steps", async () => {
+  const plan = steps()
+  expect(await applyUpdate({ ...plan, hot: {
+    enabled: () => true,
+    activate: async () => { plan.calls.push("hot activate") },
+    verify: async () => { plan.calls.push("hot verify") },
+    recover: async () => { plan.calls.push("hot recover") },
+  } })).toBe(true)
+  expect(plan.calls).toEqual(["prepare", "hot activate", "hot verify"])
+})
+
+test("failed plugin-only updates restore plugin files without restarting services", async () => {
+  const plan = steps()
+  await expect(applyUpdate({ ...plan, hot: {
+    enabled: () => true,
+    activate: async () => { plan.calls.push("hot activate") },
+    verify: async () => { throw new Error("plugin check failed") },
+    recover: async () => { plan.calls.push("hot recover") },
+  } })).rejects.toThrow("plugin check failed")
+  expect(plan.calls).toEqual(["prepare", "hot activate", "hot recover"])
+})
+
+test("only context, documentation, and test changes qualify for a running-service update", async () => {
+  const directory = await mkdtemp("/tmp/opencode/agent-update-plan-")
+  const current = join(directory, "current")
+  const next = join(directory, "next")
+  const files: Record<string, string> = {
+    "packages/plugins/context.ts": "old context",
+    "packages/telegram/src/gateway.ts": "gateway",
+    "packages/telegram/package.json": '{"client":"2.0.8"}',
+    "install.sh": "installer",
+    "bun.lock": "lockfile",
+    "README.md": "documentation",
+  }
+  try {
+    for (const root of [current, next]) {
+      await mkdir(join(root, "packages/plugins"), { recursive: true })
+      await mkdir(join(root, "packages/telegram/src"), { recursive: true })
+      for (const [file, contents] of Object.entries(files)) await writeFile(join(root, file), contents)
+      await command(["git", "init", "--quiet"], root)
+      await command(["git", "add", "."], root)
+    }
+    expect(await pluginOnlyUpdate(current, next, false)).toBe(false)
+    await writeFile(join(next, "packages/plugins/context.ts"), "new context")
+    await writeFile(join(next, "README.md"), "updated documentation")
+    expect(await pluginOnlyUpdate(current, next, false)).toBe(true)
+    expect(await pluginOnlyUpdate(current, next, true)).toBe(false)
+    for (const file of ["packages/telegram/src/gateway.ts", "packages/telegram/package.json", "install.sh", "bun.lock"]) {
+      await writeFile(join(next, file), "changed")
+      expect(await pluginOnlyUpdate(current, next, false)).toBe(false)
+      await writeFile(join(next, file), files[file]!)
+    }
+    await rm(join(next, "packages/plugins/context.ts"))
+    expect(await pluginOnlyUpdate(current, next, false)).toBe(false)
+  } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
 test("upstream update metadata must identify a V2 release", () => {

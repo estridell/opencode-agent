@@ -205,7 +205,7 @@ The final result replaces that message after the gateway connects.
 The updater downloads `main` from the installed repository's `origin` remote.
 It prepares the application in `~/.opencode-agent/versions/<update-id>`.
 It installs project dependencies and the client that matches the latest OpenCode V2 release.
-It runs type checks and automated tests before stopping the gateway.
+It runs type checks and automated tests before activation.
 It then runs the new installer and replaces the generated service file.
 The installer selects the private Bun version.
 
@@ -215,9 +215,10 @@ Push changes to `main` before updating the installed application.
 Uncommitted changes in a development checkout do not enter the update.
 
 The worker restarts OpenCode when the runtime version changes.
-Gateway startup also restarts OpenCode when it installs or updates the bundled context plugin.
 This restart can interrupt active tasks.
-Other application updates restart the Telegram gateway while OpenCode continues to run.
+Context-plugin-only updates keep Telegram and OpenCode running.
+OpenCode's file watcher automatically reloads the changed plugin.
+Changes to gateway code, dependencies, or the installer restart the Telegram gateway.
 An unchanged installation reports that it is up to date without a restart.
 
 Updates require the systemd user service.
@@ -246,7 +247,7 @@ For development, test runtime and client changes together with `bun run test:liv
 The initial runtime version comes from `packages/telegram/package.json`.
 
 The application context note is in `packages/plugins/context.ts`.
-After an update, the next agent request receives the note in existing and new Telegram sessions.
+After plugin reload, the next agent request receives the note in existing and new Telegram sessions.
 The note also applies to their child sessions.
 
 To test plugin activation and outgoing system instructions with a temporary runtime, run:
@@ -256,7 +257,8 @@ OPENCODE_AGENT_HOME=/tmp/opencode/agent-context-check bun run test:context
 ```
 
 The test uses a local simulated model endpoint and separate OpenCode data.
-It checks session scope, preserved base prompts, repeated requests, and activation after an OpenCode restart.
+It checks session scope, preserved base prompts, and plugin reload during an active model request.
+It also checks that the runtime process stays running and gateway reconnection preserves the new note.
 
 To test runtime replacement with temporary data, run:
 

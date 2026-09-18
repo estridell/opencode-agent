@@ -68,9 +68,11 @@ Title, compaction, and transient generation requests retain their existing instr
 Startup copies the self-contained TypeScript file to the separate runtime's global plugin directory.
 The destination is `runtime/config/opencode/plugins/opencode-agent-context.ts` under the agent directory.
 The installer compares file contents and replaces a changed copy atomically.
-Startup then stops the owned OpenCode service so the next connection loads the new plugin.
-An unchanged plugin does not trigger a restart.
-This startup path also activates the plugin when an older updater installs this application version.
+OpenCode's file watcher loads changed local plugins after its notification and debounce delay.
+Plugin installation does not stop either service.
+An active model request keeps its current instructions; subsequent requests receive the changed note after reload.
+Runtime preparation reads the plugin from `current` when an installed application exists.
+Thus, a gateway from an earlier application directory cannot restore its old plugin during reconnection.
 
 The official plugin package supplies development types; its version follows the runtime and client during updates.
 The deployed file has no runtime imports or dependencies.
@@ -203,12 +205,28 @@ The worker runs independently of the gateway service and the terminal.
 Each update clones `main` into a new application directory.
 It resolves the latest V2 release through the upstream update API.
 It selects that exact version for `@opencode/client` and the `@opencode/plugin` development types in the prepared copy.
-It installs dependencies and runs type checks and tests before stopping the gateway.
+It installs dependencies and runs type checks and tests before activation.
 Repository dependency versions otherwise follow the committed lockfile.
 The installer selects the Bun version and regenerates the launcher.
 
+The worker compares tracked file contents and file modes in the current and prepared application directories.
+A context-plugin-only update can also change documentation and tests.
+Any other file change, including dependencies, installer code, or gateway code, uses the normal gateway restart path.
+A runtime version change always uses that path.
+
+Context-plugin-only updates require a running gateway, a healthy owned OpenCode service, and the managed `current` link.
+The worker selects the prepared directory and replaces the plugin file without stopping either service.
+OpenCode's native file watcher reloads the plugin asynchronously.
+The worker checks service availability, runtime version, and unchanged process IDs before recording the update.
+This check does not send a model request or wait for a specific plugin generation.
+An activation or health-check failure restores the previous application link and plugin file without restarting services.
+
+The running gateway can remain in its previous application directory after a context-plugin-only update.
+New update workers start from the selected application's stable path.
+Readiness continues to identify the running gateway; `installed.json` identifies the selected application.
+
 An atomic link replacement selects the application directory at `current`.
-The new application's service installer checks and installs the systemd unit.
+For updates that restart the gateway, the new application's service installer checks and installs the systemd unit.
 The worker replaces the runtime binary only after stopping the separate OpenCode service.
 It retains the previous binary in the prepared application directory.
 It does not change the host OpenCode installation.

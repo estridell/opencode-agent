@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto"
-import { appendFile, copyFile, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises"
+import { appendFile, copyFile, lstat, mkdir, readFile, readlink, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { setTimeout as sleep } from "node:timers/promises"
 import { Api, GrammyError } from "grammy"
 import { Service } from "@opencode/client/service"
 import { agentHome, errorText, loadConfig } from "./config"
-import { cliPath, unitName } from "./service"
-import { downloadRuntime, prepareRuntime, registrationFile, upstreamBinary } from "./runtime"
+import { installedCliPath, unitName } from "./service"
+import { downloadRuntime, prepareRuntime, registrationFile, runtimeEnv, upstreamBinary } from "./runtime"
+import { installContextPlugin } from "./plugins"
+import { OpenCode } from "@opencode/client"
 
 export type UpdateState = { id: string; phase: "running" | "done" | "failed"; text: string; time: number; messages?: string[] }
 export const updateUnit = () => `opencode-agent-update-${createHash("sha256").update(agentHome()).digest("hex").slice(0, 12)}`
@@ -34,7 +36,7 @@ export async function startUpdate(messageID?: number): Promise<string> {
       `--setenv=OPENCODE_AGENT_HOME=${agentHome()}`, `--setenv=PATH=${process.env.PATH ?? "/usr/bin:/bin"}`,
       ...(process.env.XDG_CONFIG_HOME ? [`--setenv=XDG_CONFIG_HOME=${process.env.XDG_CONFIG_HOME}`] : []),
       "--", "flock", "--no-fork", "--nonblock", join(agentHome(), "update.lock"),
-      process.execPath, cliPath(), "update", "_run", id, ...(messageID ? [String(messageID)] : []),
+      process.execPath, installedCliPath(), "update", "_run", id, ...(messageID ? [String(messageID)] : []),
     ])
   } catch (error) {
     await writeFile(jobFile(id), JSON.stringify({ ...state, phase: "failed", text: errorText(error) }))
@@ -63,12 +65,57 @@ export function releaseVersion(value: unknown): string {
   return version
 }
 
+/** Compare effective installed files, including locally pinned dependency versions. */
+export async function pluginOnlyUpdate(current: string, next: string, runtimeChanged: boolean): Promise<boolean> {
+  if (runtimeChanged) return false
+  const inventories = await Promise.all([current, next].map(async directory =>
+    (await command(["git", "ls-files", "-z"], directory)).split("\0").filter(Boolean)))
+  let contextChanged = false
+  for (const file of new Set(inventories.flat())) {
+    const read = async (root: string) => {
+      const path = join(root, file)
+      const info = await lstat(path).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+        return undefined
+      })
+      if (!info) return undefined
+      const bytes = info.isSymbolicLink() ? Buffer.from(await readlink(path)) : await readFile(path)
+      return `${info.mode}:${createHash("sha256").update(bytes).digest("hex")}`
+    }
+    const [before, after] = await Promise.all([read(current), read(next)])
+    if (before === after) continue
+    if (file === "packages/plugins/context.ts" && before && after) { contextChanged = true; continue }
+    if (["README.md", "packages/plugins/README.md"].includes(file) || /^docs\/.*\.md$/.test(file) || /^packages\/telegram\/test\/.*\.ts$/.test(file)) continue
+    return false
+  }
+  return contextChanged
+}
+
+export async function selectApplication(directory: string, home = agentHome()) {
+  const temporary = join(home, `current.next.${crypto.randomUUID()}`)
+  await symlink(directory, temporary)
+  try { await rename(temporary, join(home, "current")) }
+  finally { await rm(temporary, { force: true }) }
+}
+
 /** Preparation errors leave the running service intact. Recovery never downgrades a migrated runtime database. */
 export async function applyUpdate(steps: {
   prepare(): Promise<void | false>; stop(): Promise<void>; activate(): Promise<void>
   start(): Promise<void>; verify(): Promise<void>; recover(): Promise<void>
+  hot?: { enabled(): boolean; activate(): Promise<void>; verify(): Promise<void>; recover(): Promise<void> }
 }) {
   if (await steps.prepare() === false) return false
+  if (steps.hot?.enabled()) {
+    try {
+      await steps.hot.activate()
+      await steps.hot.verify()
+      return true
+    } catch (error) {
+      try { await steps.hot.recover() }
+      catch (recovery) { throw new Error(`${errorText(error)}\nPlugin recovery also failed: ${errorText(recovery)}`) }
+      throw error
+    }
+  }
   try {
     await steps.stop()
     await steps.activate()
@@ -122,6 +169,15 @@ export async function runUpdate(id: string, messageID?: number) {
   let runtimeChanged = false
   let restartAt = 0
   let stopped = false
+  let hot = false
+  let gatewayPID = ""
+  let runtimePID = 0
+  let selected = false
+  const saveInstalled = async () => {
+    const file = join(agentHome(), "installed.json")
+    await writeFile(`${file}.next`, JSON.stringify({ commit, version, source: stage, time: Date.now() }, null, 2), { mode: 0o600 })
+    await rename(`${file}.next`, file)
+  }
   try {
     const changed = await applyUpdate({
       prepare: async () => {
@@ -158,13 +214,22 @@ export async function runUpdate(id: string, messageID?: number) {
         await report("Checking the application.")
         await run([process.execPath, "run", "check"], stage)
         await run([process.execPath, "test"], stage)
+        hot = await pluginOnlyUpdate(root, stage, runtimeChanged)
+        if (hot) {
+          // Require a managed, healthy gateway before choosing the no-restart path.
+          const currentPath = await realpath(join(agentHome(), "current")).catch(() => "")
+          gatewayPID = await command(["systemctl", "--user", "show", unitName, "--property=MainPID", "--value"])
+          const endpoint = await Service.discover({ file: registrationFile() })
+          hot = currentPath === await realpath(root) && Number(gatewayPID) > 0 && !!endpoint
+          if (hot) runtimePID = (await Bun.file(registrationFile()).json()).pid
+        }
         if (runtimeChanged) {
           await report(`Downloading OpenCode V2 ${version}.`)
           binary = await downloadRuntime(version, join(stage, ".runtime"))
         }
       },
       stop: async () => {
-        await report(runtimeChanged ? "Restarting the gateway and OpenCode. Active tasks can be interrupted." : "Restarting the Telegram gateway. Plugin changes can also restart OpenCode.")
+        await report(runtimeChanged ? "Restarting the gateway and OpenCode. Active tasks can be interrupted." : "Restarting the Telegram gateway.")
         stopped = true
         await run(["systemctl", "--user", "stop", unitName])
         // Also wait for the child to release the gateway lock before touching files.
@@ -191,7 +256,7 @@ export async function runUpdate(id: string, messageID?: number) {
         while (Date.now() < deadline) {
           const ready = await Bun.file(join(agentHome(), "gateway-ready.json")).json().catch(() => undefined)
           if (ready?.time >= restartAt && ready.version === version && resolve(ready.source) === resolve(stage)) {
-            await writeFile(join(agentHome(), "installed.json"), JSON.stringify({ commit, version, source: stage, time: Date.now() }, null, 2), { mode: 0o600 })
+            await saveInstalled()
             return
           }
           await sleep(1000)
@@ -201,8 +266,33 @@ export async function runUpdate(id: string, messageID?: number) {
       recover: async () => {
         if (stopped) await run(["systemctl", "--user", "restart", unitName])
       },
+      hot: {
+        enabled: () => hot,
+        activate: async () => {
+          await report("Updating the context plugin. Telegram and OpenCode remain running.")
+          await selectApplication(stage)
+          selected = true
+          await installContextPlugin(runtimeEnv().XDG_CONFIG_HOME!, join(stage, "packages/plugins/context.ts"))
+        },
+        verify: async () => {
+          const endpoint = await Service.discover({ file: registrationFile() })
+          if (!endpoint) throw new Error("The separate OpenCode service is unavailable.")
+          const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
+          const info = await client.server.info({ signal: AbortSignal.timeout(15_000) })
+          const pid = await command(["systemctl", "--user", "show", unitName, "--property=MainPID", "--value"])
+          if (pid !== gatewayPID || (await Bun.file(registrationFile()).json()).pid !== runtimePID || info.version !== version) {
+            throw new Error("A service changed during the plugin update.")
+          }
+          await saveInstalled()
+        },
+        recover: async () => {
+          if (!selected) return
+          await selectApplication(root)
+          await installContextPlugin(runtimeEnv().XDG_CONFIG_HOME!, join(root, "packages/plugins/context.ts"))
+        },
+      },
     })
-    await report(changed ? `Update complete.\nApplication: ${commit}\nOpenCode: ${version}\nTelegram connected.` : `Already up to date.\nApplication: ${commit}\nOpenCode: ${version}`, "done")
+    await report(changed ? `Update complete.\nApplication: ${commit}\nOpenCode: ${version}\n${hot ? "Plugin files updated. Services kept running." : "Telegram connected."}` : `Already up to date.\nApplication: ${commit}\nOpenCode: ${version}`, "done")
   } catch (error) {
     await report(`Update failed.\n${errorText(error, [config.token])}\nLog: ${log}`, "failed")
     process.exitCode = 1

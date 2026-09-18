@@ -1,11 +1,13 @@
 import assert from "node:assert/strict"
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readlink, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { setTimeout as sleep } from "node:timers/promises"
 import { Service } from "@opencode/client/service"
 import { applicationContext } from "../../plugins/context"
 import { agentHome } from "../src/config"
 import { connect } from "../src/opencode"
+import { installContextPlugin } from "../src/plugins"
+import { selectApplication } from "../src/update"
 import { installRuntime, prepareRuntime, registrationFile, runtimeEnv, upstreamBinary, workspace } from "../src/runtime"
 
 if (!process.env.OPENCODE_AGENT_HOME?.startsWith("/tmp/opencode/") || await Bun.file(join(agentHome(), "config.json")).exists()) {
@@ -14,15 +16,19 @@ if (!process.env.OPENCODE_AGENT_HOME?.startsWith("/tmp/opencode/") || await Bun.
 
 // Capture real provider requests from the upstream runtime without a remote model or credentials.
 const requests: { messages: { role: string; content: unknown }[] }[] = []
+let holdResponse: Promise<void> | undefined
 const server = Bun.serve({
   hostname: "127.0.0.1", port: 0,
   async fetch(request) {
     const body = await request.json() as typeof requests[number] & { model: string }
     requests.push(body)
+    await holdResponse
     const chunk = (delta: object, finish_reason: string | null) => `data: ${JSON.stringify({ id: "chatcmpl-test", object: "chat.completion.chunk", created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`
     return new Response(chunk({ role: "assistant", content: "OK" }, null) + chunk({}, "stop") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } })
   },
 })
+const previous = await readlink(join(agentHome(), "current")).catch(() => undefined)
+let selected = false
 
 try {
   await prepareRuntime()
@@ -45,7 +51,7 @@ try {
   const unrelated = await client.session.create({ title: "Context unrelated", location })
   const custom = await client.session.create({ title: "Context custom", location, agent: "custom", metadata: parent.metadata })
 
-  const check = async (sessionID: string, expected: boolean, base: string) => {
+  const check = async (sessionID: string, expected: boolean, base: string, note = applicationContext) => {
     requests.length = 0
     await client.session.prompt({ sessionID, text: "Context integration probe. Reply OK." })
     const deadline = Date.now() + 20_000
@@ -59,7 +65,7 @@ try {
     assert.ok(requests.length, "No request reached the local provider.")
     const system = requests.at(-1)!.messages.filter(m => m.role === "system" || m.role === "developer").map(m => typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n")
     assert.ok(system.includes(base), "The upstream or custom base prompt must remain present.")
-    assert.equal(system.split(applicationContext).length - 1, expected ? 1 : 0)
+    assert.equal(system.split(note).length - 1, expected ? 1 : 0)
   }
 
   await check(parent.id, true, "You are an AI agent running in OpenCode")
@@ -71,15 +77,48 @@ try {
   await client.session.switchModel({ sessionID: parent.id, model: { providerID: "fixture", id: "gpt-6-context-test" } })
   await check(parent.id, true, "Do not settle for a partial")
 
-  // Simulate an older deployed plugin: connect must repair it and restart the owned service.
+  // Update a loaded plugin and reconnect through the old gateway module.
+  // The selected checkout must supply the note without replacing the service.
   const before = await Bun.file(registrationFile()).json()
-  await writeFile(join(configDirectory, "plugins", "opencode-agent-context.ts"), 'export default { id: "opencode-agent.context", setup() {} }\n')
+  const stage = join(agentHome(), "versions", crypto.randomUUID())
+  await mkdir(join(stage, "packages/plugins"), { recursive: true })
+  const source = await readFile(new URL("../../plugins/context.ts", import.meta.url), "utf8")
+  const revised = applicationContext.replace("Keep replies suitable for a Telegram conversation.", "Keep replies short for this live reload test.")
+  await writeFile(join(stage, "packages/plugins/context.ts"), source.replace(applicationContext, revised))
+  let release!: () => void
+  holdResponse = new Promise<void>(resolve => { release = resolve })
+  requests.length = 0
+  await client.session.prompt({ sessionID: parent.id, text: "Keep this request active during the plugin update." })
+  const waiting = Date.now() + 10_000
+  while (!requests.length && Date.now() < waiting) await sleep(50)
+  assert.ok(requests.length, "The model request must start before the plugin update.")
+  await selectApplication(stage)
+  selected = true
+  await installContextPlugin(runtimeEnv().XDG_CONFIG_HOME!)
+  await sleep(500)
+  assert.ok(Object.hasOwn(await client.session.active(), parent.id), "Plugin reload must preserve the active request.")
+  release()
+  holdResponse = undefined
+  const finishing = Date.now() + 10_000
+  while (Object.hasOwn(await client.session.active(), parent.id) && Date.now() < finishing) await sleep(50)
+  assert.ok(!Object.hasOwn(await client.session.active(), parent.id), "The active request must finish after plugin reload.")
+  // Watcher notification and the upstream 100 ms debounce are asynchronous.
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    try { await check(parent.id, true, "Do not settle for a partial", revised); break }
+    catch (error) { if (!(error instanceof assert.AssertionError) || Date.now() >= deadline) throw error }
+    await sleep(100)
+  }
   client = await connect()
   const after = await Bun.file(registrationFile()).json()
-  assert.notEqual(before?.pid, after?.pid)
-  await check(parent.id, true, "Do not settle for a partial")
-  console.log("Context plugin passed: Telegram scope, unrelated sessions, custom and model-specific prompts, repeated requests, and activation after restart.")
+  assert.equal(before.pid, after.pid)
+  await check(parent.id, true, "Do not settle for a partial", revised)
+  console.log("Context plugin passed: session scope, preserved prompts, live reload during an active request, unchanged runtime process, and reconnect through the previous gateway module.")
 } finally {
   await Service.stop({ file: registrationFile() })
   await server.stop(true)
+  if (selected) {
+    if (previous) await selectApplication(previous)
+    else await rm(join(agentHome(), "current"))
+  }
 }

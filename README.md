@@ -122,8 +122,11 @@ Telegram uses one progress message, including the final result after a restart.
 The update worker runs separately from the gateway.
 It continues if the gateway stops or you close the terminal.
 
-The updater prepares and checks a new application directory before it stops the gateway.
-It restarts OpenCode when the runtime version or bundled context plugin changes.
+The updater prepares and checks a new application directory before activation.
+Context-plugin-only updates keep Telegram and OpenCode running.
+OpenCode automatically reloads the changed plugin.
+Gateway code, dependency, and installer changes restart the gateway.
+Runtime version changes restart both services.
 A runtime restart can interrupt active tasks.
 An unchanged installation does not restart.
 

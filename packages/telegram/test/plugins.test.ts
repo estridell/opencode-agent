@@ -35,16 +35,17 @@ test("context applies to Telegram descendants and preserves base instructions an
 test("plugin installation replaces only its managed file and skips unchanged copies", async () => {
   await mkdir("/tmp/opencode", { recursive: true })
   const directory = await mkdtemp("/tmp/opencode/agent-context-install-")
+  const source = new URL("../../plugins/context.ts", import.meta.url)
   try {
-    expect(await installContextPlugin(directory)).toBe(true)
+    expect(await installContextPlugin(directory, source)).toBe(true)
     const path = join(directory, "opencode/plugins/opencode-agent-context.ts")
     const first = await stat(path)
-    expect(await installContextPlugin(directory)).toBe(false)
+    expect(await installContextPlugin(directory, source)).toBe(false)
     expect((await stat(path)).mtimeMs).toBe(first.mtimeMs)
     const other = join(directory, "opencode/plugins/custom.ts")
     await writeFile(other, "unrelated plugin")
     await writeFile(path, "old plugin")
-    expect(await installContextPlugin(directory)).toBe(true)
+    expect(await installContextPlugin(directory, source)).toBe(true)
     expect(await readFile(path, "utf8")).toContain(applicationContext)
     expect(await readFile(other, "utf8")).toBe("unrelated plugin")
   } finally { await rm(directory, { recursive: true, force: true }) }
