@@ -7,6 +7,7 @@ import { agentHome, configPath, errorText, loadConfig, saveConfig, type Config }
 import { installRuntime, prepareRuntime, runOpenCode, upstreamBinary, workspace } from "./runtime"
 import { installService } from "./service"
 import { Store } from "./store"
+import { prepareVoice } from "./voice"
 
 export async function setup() {
   if (!process.stdin.isTTY) throw new Error("Run opencode-agent setup in a terminal.")
@@ -48,10 +49,12 @@ export async function setup() {
   try {
     const binding = `${bot.id}:${ownerID}`
     if (store.get("binding") && store.get("binding") !== binding) throw new Error("This installation uses a different bot or owner. Set OPENCODE_AGENT_HOME to a different directory.")
-    await saveConfig({ token, ownerID, directory, autoApprove: existing?.autoApprove ?? true })
+    await saveConfig({ ...existing, token, ownerID, directory, autoApprove: existing?.autoApprove ?? true })
     store.set("binding", binding)
   } finally { store.close() }
   console.log(`Configuration saved: ${configPath()}`)
+  console.log("Preparing local English voice transcription.")
+  await prepareVoice(agentHome(), (await loadConfig()).voice)
   if (await confirm("Install and start the Telegram service?")) {
     await installService()
     console.log(`Setup complete. Send a message to @${bot.username}.`)

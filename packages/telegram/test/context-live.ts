@@ -1,11 +1,14 @@
 import assert from "node:assert/strict"
-import { mkdir, readFile, readlink, rename, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { setTimeout as sleep } from "node:timers/promises"
+import { fileURLToPath } from "node:url"
 import { Service } from "@opencode/client/service"
-import { applicationContext } from "../../plugins/context"
+import { applicationContext, telegramContext } from "../../plugins/context"
+import { agentSkillAddition } from "../src/assistant"
 import { agentHome } from "../src/config"
 import { connect } from "../src/opencode"
+import { recall } from "../src/recall"
 import { installPlugins } from "../src/plugins"
 import { selectApplication } from "../src/update"
 import { installRuntime, prepareRuntime, registrationFile, runtimeEnv, upstreamBinary, workspace } from "../src/runtime"
@@ -17,11 +20,13 @@ if (!process.env.OPENCODE_AGENT_HOME?.startsWith("/tmp/opencode/") || await Bun.
 // Capture real provider requests from the upstream runtime without a remote model or credentials.
 const requests: { messages: { role: string; content: unknown }[] }[] = []
 let holdResponse: Promise<void> | undefined
+let failResponse = false
 const server = Bun.serve({
   hostname: "127.0.0.1", port: 0,
   async fetch(request) {
     const body = await request.json() as typeof requests[number] & { model: string }
     requests.push(body)
+    if (failResponse) return Response.json({ error: { type: "invalid_request_error", message: "Intentional retry test failure." } }, { status: 400 })
     await holdResponse
     const chunk = (delta: object, finish_reason: string | null) => `data: ${JSON.stringify({ id: "chatcmpl-test", object: "chat.completion.chunk", created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`
     return new Response(chunk({ role: "assistant", content: "OK" }, null) + chunk({}, "stop") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } })
@@ -45,13 +50,35 @@ try {
     } },
     agents: { custom: { mode: "primary", system: "Custom base instructions for the integration test." } },
   }))
+  const nativeInstruction = "Preserve this native instruction marker: CONTEXT_LIVE_NATIVE."
+  const userMemory = "Context live preference marker: CONTEXT_LIVE_USER_MEMORY."
+  const generalMemory = "Context live durable marker: CONTEXT_LIVE_GENERAL_MEMORY."
+  await writeFile(join(workspace(), "AGENTS.md"), nativeInstruction + "\n")
+  await mkdir(join(agentHome(), "memory"), { recursive: true })
+  await writeFile(join(agentHome(), "memory", "USER.md"), userMemory + "\n")
+  await writeFile(join(agentHome(), "memory", "MEMORY.md"), generalMemory + "\n")
   let client = await connect()
   const location = { directory: workspace() }
   const parent = await client.session.create({ title: "Context parent", location, metadata: { source: "opencode-agent", transport: "telegram" } })
+  const child = await client.session.import({
+    info: {
+      ...parent,
+      id: `ses_context_child_${Date.now()}`,
+      parentID: parent.id,
+      title: "Context child",
+      metadata: { source: "context-live-child" },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: Date.now(), updated: Date.now() },
+    },
+    messages: [],
+    location,
+  })
+  assert.equal(child.parentID, parent.id)
   const unrelated = await client.session.create({ title: "Context unrelated", location })
   const custom = await client.session.create({ title: "Context custom", location, agent: "custom", metadata: parent.metadata })
 
-  const check = async (sessionID: string, expected: boolean, base: string, note = applicationContext) => {
+  const check = async (sessionID: string, expected: boolean, base: string, note = applicationContext, included: string[] = [], excluded: string[] = []) => {
     requests.length = 0
     await client.session.prompt({ sessionID, text: "Context integration probe. Reply OK." })
     const deadline = Date.now() + 20_000
@@ -66,16 +93,64 @@ try {
     const system = requests.at(-1)!.messages.filter(m => m.role === "system" || m.role === "developer").map(m => typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n")
     assert.ok(system.includes(base), "The upstream or custom base prompt must remain present.")
     assert.equal(system.split(note).length - 1, expected ? 1 : 0, `Unexpected plugin note: ${note}`)
+    for (const text of included) assert.ok(system.includes(text), `The request must include: ${text}`)
+    for (const text of excluded) assert.ok(!system.includes(text), `The request must not include: ${text}`)
   }
 
-  await check(parent.id, true, "You are an AI agent running in OpenCode")
-  const plugins = await client.plugin.list({ location })
-  assert.ok(JSON.stringify(plugins).includes("opencode-agent.context"), `The runtime must load the deployed plugin: ${JSON.stringify(plugins)}`)
-  await check(parent.id, true, "You are an AI agent running in OpenCode")
-  await check(unrelated.id, false, "You are an AI agent running in OpenCode")
-  await check(custom.id, true, "Custom base instructions")
+  const expectedPlugins = ["opencode-agent.context", "opencode-agent.recall", "opencode-agent.schedules"]
+  const activePlugins = async () => {
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      const plugins = await client.plugin.list({ location })
+      const selected = plugins.data.filter(plugin => typeof plugin.id === "string" && expectedPlugins.includes(plugin.id))
+      const failed = selected.find(plugin => plugin.state.status === "failed")
+      if (failed) throw new Error(`Managed plugin failed to load: ${JSON.stringify(failed)}`)
+      if (expectedPlugins.every(id => selected.some(plugin => plugin.id === id && plugin.state.status === "active"))) return plugins
+      if (Date.now() >= deadline) throw new Error(`Managed plugins did not become active: ${JSON.stringify(plugins)}`)
+      await sleep(100)
+    }
+  }
+  await activePlugins()
+  const skills = await client.skill.list({ location })
+  const nativeSkill = skills.data.find(skill => skill.id === "opencode")
+  const agentSkill = skills.data.find(skill => skill.id === "opencode-agent")
+  assert.ok(nativeSkill, `The runtime must provide the native OpenCode skill: ${JSON.stringify(skills)}`)
+  assert.ok(agentSkill, `The runtime must provide the OpenCode Agent skill: ${JSON.stringify(skills)}`)
+  assert.equal(agentSkill.content, `${agentSkillAddition}\n${nativeSkill.content}`)
+
+  const managed = [nativeInstruction, "# OpenCode Agent installation\n", userMemory, generalMemory]
+  await check(parent.id, true, "You are an AI agent running in OpenCode", applicationContext, [...managed, telegramContext])
+  await check(child.id, true, "You are an AI agent running in OpenCode", applicationContext, [...managed, telegramContext])
+  await check(unrelated.id, true, "You are an AI agent running in OpenCode", applicationContext, managed, [telegramContext])
+  await check(custom.id, true, "Custom base instructions", applicationContext, [...managed, telegramContext])
   await client.session.switchModel({ sessionID: parent.id, model: { providerID: "fixture", id: "gpt-6-context-test" } })
-  await check(parent.id, true, "Do not settle for a partial")
+  await check(parent.id, true, "Do not settle for a partial", applicationContext, [...managed, telegramContext])
+
+  const recalled = await recall(client, { query: "Context integration probe" })
+  assert.ok("matches" in recalled && recalled.matches?.length, "Recall must find native saved conversation text.")
+
+  const retrySession = await client.session.create({ title: "Native retry test", location })
+  const originalID = `msg_retry_probe_${Date.now()}`
+  failResponse = true
+  await client.session.prompt({ sessionID: retrySession.id, id: originalID, text: "Retry integration probe. Reply OK." })
+  const awaitOutcome = async (outcome: string) => {
+    const deadline = Date.now() + 20_000
+    for (;;) {
+      const session = await client.session.get({ sessionID: retrySession.id })
+      if (session.outcome === outcome && !Object.hasOwn(await client.session.active(), session.id)) return
+      if (Date.now() >= deadline) throw new Error(`Native retry did not reach ${outcome}.`)
+      await sleep(100)
+    }
+  }
+  await awaitOutcome("failed")
+  failResponse = false
+  const original = await client.session.message.get({ sessionID: retrySession.id, messageID: originalID })
+  assert.equal(original.type, "user")
+  await client.session.prompt({ sessionID: retrySession.id, id: originalID, text: "Retry integration probe. Reply OK.", resume: true })
+  await awaitOutcome("succeeded")
+  const retryHistory = await client.message.list({ sessionID: retrySession.id, type: "user", limit: 100 })
+  assert.equal(retryHistory.data.length, 1, "Retry must not append another user message.")
+  assert.equal(retryHistory.data[0]?.id, originalID)
 
   // Update a loaded plugin and reconnect through the old gateway module.
   // The selected checkout must supply the note without replacing the service.
@@ -83,8 +158,14 @@ try {
   const stage = join(agentHome(), "versions", crypto.randomUUID())
   await mkdir(join(stage, "packages/plugins"), { recursive: true })
   const source = await readFile(new URL("../../plugins/context.ts", import.meta.url), "utf8")
-  const revised = applicationContext.replace("Keep replies suitable for a Telegram conversation.", "Keep replies short for this live reload test.")
+  const revised = applicationContext.replace("Keep replies concise.", "Keep replies short for this live reload test.")
   await writeFile(join(stage, "packages/plugins/context.ts"), source.replace(applicationContext, revised))
+  for (const name of ["recall.ts", "schedules.ts"]) {
+    await writeFile(join(stage, "packages/plugins", name), await readFile(new URL(`../../plugins/${name}`, import.meta.url)))
+  }
+  await mkdir(join(stage, "packages/telegram"), { recursive: true })
+  await symlink(fileURLToPath(new URL("../src", import.meta.url)), join(stage, "packages/telegram/src"), "dir")
+  await symlink(fileURLToPath(new URL("../node_modules", import.meta.url)), join(stage, "packages/telegram/node_modules"), "dir")
   let release!: () => void
   holdResponse = new Promise<void>(resolve => { release = resolve })
   requests.length = 0
@@ -96,6 +177,7 @@ try {
   selected = true
   await installPlugins(runtimeEnv().XDG_CONFIG_HOME!)
   await sleep(500)
+  await activePlugins()
   assert.ok(Object.hasOwn(await client.session.active(), parent.id), "Plugin reload must preserve the active request.")
   release()
   holdResponse = undefined
@@ -112,6 +194,7 @@ try {
     }
   }
   await eventually(revised, true)
+  await activePlugins()
   client = await connect()
   const after = await Bun.file(registrationFile()).json()
   assert.equal(before.pid, after.pid)

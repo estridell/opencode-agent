@@ -128,7 +128,7 @@ export async function requiresGatewayRestart(current: string, next: string, runt
   const inventories = await Promise.all([current, next].map(async directory =>
     (await command(["git", "ls-files", "-z"], directory)).split("\0").filter(Boolean)))
   for (const file of new Set(inventories.flat())) {
-    if (!file.startsWith("packages/telegram/src/") && !gatewayRestartFiles.has(file)) continue
+    if (!file.startsWith("packages/telegram/src/") && !file.startsWith("packages/telegram/assets/") && !gatewayRestartFiles.has(file)) continue
     const read = async (root: string) => {
       const path = join(root, file)
       const info = await lstat(path).catch(error => {

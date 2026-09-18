@@ -37,24 +37,25 @@ export OPENCODE_AGENT_HOME="$home"
 
 # Bootstrap system prerequisites on common fresh VM images.
 missing=false
-for command in curl git unzip tar flock; do
+for command in curl git unzip tar flock python3; do
   command -v "$command" >/dev/null 2>&1 || missing=true
 done
+python3 -c 'import ensurepip; import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1 || missing=true
 if $missing; then
   elevate=()
   if ((EUID != 0)); then
-    command -v sudo >/dev/null || { echo 'Install curl, git, unzip, tar, and util-linux first.' >&2; exit 1; }
+    command -v sudo >/dev/null || { echo 'Install curl, git, unzip, tar, util-linux, Python 3.9 or later, and Python venv support first.' >&2; exit 1; }
     elevate=(sudo)
   fi
   if command -v apt-get >/dev/null; then
     "${elevate[@]}" apt-get update
-    "${elevate[@]}" apt-get install -y curl git unzip tar util-linux ca-certificates
+    "${elevate[@]}" apt-get install -y curl git unzip tar util-linux ca-certificates python3 python3-venv
   elif command -v dnf >/dev/null; then
-    "${elevate[@]}" dnf install -y curl git unzip tar util-linux ca-certificates
+    "${elevate[@]}" dnf install -y curl git unzip tar util-linux ca-certificates python3 python3-pip
   elif command -v pacman >/dev/null; then
-    "${elevate[@]}" pacman -S --needed --noconfirm curl git unzip tar util-linux ca-certificates
+    "${elevate[@]}" pacman -S --needed --noconfirm curl git unzip tar util-linux ca-certificates python python-pip
   else
-    echo 'Install curl, git, unzip, tar, and util-linux with your package manager, then rerun.' >&2
+    echo 'Install curl, git, unzip, tar, util-linux, Python, and Python venv support. Then run the installer again.' >&2
     exit 1
   fi
 fi

@@ -9,7 +9,9 @@ Read `README.md` and `docs/implementation.md` before you change the design.
 - Use Telegram as the first interface.
 - Add shared transport code only when a second implemented interface requires it.
 - Use small OpenCode plugins for additional functions when the plugin lifecycle supports them.
-- Keep memory, scheduled tasks, and other interfaces outside the first version.
+- Keep personal memory and scheduled tasks small. Use native OpenCode sessions and tools.
+- Keep other message interfaces outside this version.
+- Do not add background memory review, automatic skill generation, or a second agent runtime.
 
 ## Documentation and text
 
@@ -43,6 +45,7 @@ Use short prompts and plain status messages. Hide credentials during input.
 ## Current version
 
 - Use Linux, Bun, TypeScript, grammY, and the official V2 client.
+- Use a separate Python environment for local Telegram voice transcription.
 - Accept messages from one owner in a private Telegram chat. Use long polling.
 - Give the agent a separate V2 binary, HOME/XDG directories, credentials, service registration, and loopback port.
 - Do not connect to or change an existing host OpenCode installation without an explicit user instruction.

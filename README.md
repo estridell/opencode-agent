@@ -19,15 +19,19 @@ OpenCode provides the agent runtime. This project does not maintain a separate v
 The first version supports one owner on a Linux machine or virtual machine (VM).
 
 - A separate OpenCode V2 installation, service, configuration, credentials, and session database.
-- Text messages, photos, and image files in a private Telegram chat.
+- Text messages, photos, files, and local English voice transcription in a private Telegram chat.
+- File attachments in agent responses.
 - New messages that change the instructions for a task in progress.
 - Saved sessions with commands to create, select, and stop them.
-- Agent responses with a temporary Telegram typing indicator during work.
+- One short activity message during work, replaced by the final response.
 - Automatic permission approval, optional permission buttons, and questions with buttons or text answers.
 - Model, model variant, and agent selection in a single message, with optional defaults for new sessions.
 - Plain terminal setup with direct entry of your Telegram user ID.
 - A systemd user service for background operation.
-- A short general-purpose assistant context added to OpenCode's model-specific instructions.
+- Personal-assistant context and an additive OpenCode Agent skill for configuration and operation.
+- Compact personal memory and conversation recall through native OpenCode history.
+- One-time and recurring scheduled tasks with Telegram results.
+- Configuration commands, usage information, context compaction, and retries for failed requests.
 
 Initial setup uses OpenCode V2 **2.0.8** and the matching official client.
 The update command installs the latest V2 runtime and its matching client after application checks pass.
@@ -68,6 +72,9 @@ Tell the agent which repository or directory to use in your message.
 | `/sessions` | Select a previous bot session |
 | `/stop` | Stop work in the selected session |
 | `/status` | Show the directory, agent, model, and activity |
+| `/usage` | Show session usage and a context estimate |
+| `/compact` | Request native context compaction |
+| `/retry` | Retry the failed request with its original message ID |
 | `/model [search]` | Select a model and model variant |
 | `/agent` | Select a primary agent |
 | `/update` | Update the application and OpenCode |
@@ -84,6 +91,37 @@ Supported formats are PNG, JPEG, GIF, and WebP, up to 20 MiB per image.
 Select a model with image input through `/model`.
 Images use the current session and can add information to a task in progress.
 Telegram albums send each image as a separate request.
+
+Send other files to make them available on the agent machine. The download limit is 20 MiB per file.
+The agent uses native OpenCode tools to read or process each file.
+Ask the agent to attach a generated file to its response. The upload limit is 50 MiB per file.
+
+Send an English voice message to use local speech transcription.
+Setup installs `faster-whisper` in a separate Python environment and downloads the `tiny.en` model.
+Transcription uses CPU INT8, which stores model values with reduced precision to use less memory.
+The gateway remains available while transcription runs. `/stop` cancels a pending voice request in the selected session.
+
+The activity message uses short text, such as **Thinking.** or **Running shell.**
+The final response replaces it. Long responses continue in additional messages.
+Set `progress` to `false` for typing indicators only.
+
+## Memory and scheduled tasks
+
+The assistant shares personal memory between Telegram and the managed terminal interface.
+It uses `memory/USER.md` for preferences and `memory/MEMORY.md` for other durable facts.
+It can update these files during ordinary conversations. Ask it to correct or forget an entry when necessary.
+Conversation recall reads saved OpenCode history, including messages before context compaction.
+
+Ask the assistant to create, list, change, pause, resume, or remove scheduled tasks.
+For example: **Remind me tomorrow at 09:00 to call the garage.**
+For recurring work: **Every weekday at 08:00, send me a short weather report for Stockholm.**
+
+Scheduled tasks run in fresh OpenCode sessions and send results to Telegram.
+The gateway must run for tasks to start. Missed runs are skipped after downtime.
+Use `opencode-agent config set timezone Europe/Stockholm` to set your timezone.
+The initial timezone follows the agent machine.
+
+## Chat controls
 
 The model, agent, and session pickers update the same message when you change pages.
 The final selection replaces the picker and removes its buttons.
@@ -108,6 +146,9 @@ opencode-agent gateway status          # Show the Telegram service status
 opencode-agent gateway restart         # Restart the Telegram service
 opencode-agent gateway logs            # Show the Telegram service logs
 opencode-agent doctor                  # Check OpenCode and Telegram
+opencode-agent config get              # Show project settings with credentials hidden
+opencode-agent config set memory.maxChars 3000
+opencode-agent voice setup             # Prepare the configured local speech model
 opencode-agent opencode auth login     # Sign in to a model provider
 ```
 
@@ -160,8 +201,9 @@ It uses long polling to get Telegram messages through outbound requests.
 It does not require a public inbound network endpoint.
 
 OpenCode controls models, providers, tools, sessions, permissions, MCP, file access, and agent execution.
-The bundled context plugin describes the general-purpose assistant role, Telegram connection, and agent machine.
-It appends these instructions for gateway sessions and their child sessions through OpenCode's `context` hook.
+The bundled context plugin describes the personal-assistant role, installation, and memory files.
+It adds Telegram instructions to gateway sessions and their child sessions through OpenCode's `context` hook.
+The managed terminal interface receives the same personal context and memory.
 The source text is in [`packages/plugins/context.ts`](packages/plugins/context.ts).
 See [Implementation](docs/implementation.md) for the design and current limits.
 
@@ -200,10 +242,11 @@ It tests sessions, message submission, forms, permissions, interruption, history
 It does not call a model provider. It stops the test service when it finishes.
 See the [acceptance test](docs/installation.md#acceptance-test) for checks with a real Telegram bot.
 
-## Future work
+## Scope
 
-Possible functions include personal memory, scheduled tasks, notifications, personal tools, and other message interfaces.
-These functions are outside the first version.
+This version serves one owner through Telegram on Linux.
+It uses native OpenCode skills, MCP, Code Mode, web tools, and model providers.
+Background memory review, automatic skill generation, spoken responses, and other message interfaces are outside this version.
 
 ## Project name
 

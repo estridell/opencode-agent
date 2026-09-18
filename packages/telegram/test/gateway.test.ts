@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Api } from "grammy"
 import type { Update } from "grammy/types"
-import { OpenCode, type FormInfo, type PermissionRequest, type SessionInfo, type SessionMessageAssistant } from "@opencode/client"
+import { OpenCode, type FormInfo, type OpenCodeEvent, type PermissionRequest, type SessionInfo, type SessionMessageAssistant } from "@opencode/client"
 import { Store } from "../src/store"
 import { Gateway, authorized } from "../src/gateway"
 import { formatText } from "../src/format"
@@ -10,6 +10,9 @@ import { parseAnswer, visible } from "../src/forms"
 import { systemdQuote } from "../src/service"
 import { parseConfig } from "../src/config"
 import { imageLimit, imageType } from "../src/images"
+import { mkdtempSync, rmSync } from "node:fs"
+import { join } from "node:path"
+import { Schedules } from "../src/schedules"
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGNwONBAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAC3PAFuD+GVmAAAAAElFTkSuQmCC", "base64")
 
@@ -26,7 +29,11 @@ function photo(id: number, caption?: string, from = 42): Update {
 }
 
 const stores: Store[] = []
-afterEach(() => { for (const store of stores.splice(0)) store.close() })
+const homes: string[] = []
+afterEach(() => {
+  for (const store of stores.splice(0)) store.close()
+  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+})
 
 function message(id: number, text: string, from = 42): Update {
   return { update_id: id, message: { message_id: id, date: 0, from: { id: from, is_bot: false, first_name: "Owner" }, chat: { id: from, type: "private", first_name: "Owner" }, text } }
@@ -43,9 +50,11 @@ function fixture() {
   const calls: { path: string; body: Record<string, unknown>; query: URLSearchParams }[] = []
   const telegram: { method: string; payload: Record<string, unknown> }[] = []
   const admissions = new Set<string>()
+  const originals = new Map<string, { id: string; type: "user"; text: string }>()
   const running: Record<string, { type: "running" }> = {}
   const models = Array.from({ length: 18 }, (_, i) => ({
     id: `model-${i}`, name: `Model ${i}`, providerID: "provider", enabled: true,
+    limit: { context: 100000, output: 10000 },
     variants: i === 17 ? [] : [{ id: "low" }, { id: "high" }],
   }))
   const agents = [{ id: "build", name: "Build", mode: "primary", hidden: false }, { id: "plan", name: "Plan", mode: "primary", hidden: false }]
@@ -75,8 +84,20 @@ function fixture() {
     else if (path === "/api/session") { data = { data: [...sessions.values()].filter(s => s.parentID === url.searchParams.get("parentID")), cursor: {} }; raw = true }
     else if (/\/prompt$/.test(path)) {
       admissions.add(body.id)
+      if (!originals.has(body.id)) originals.set(body.id, { id: body.id, type: "user", text: body.text })
       if (failAdmission) { failAdmission = false; throw new Error("Simulated connection reset after admission") }
       data = { id: body.id }
+    } else if (/\/message\/[^/]+$/.test(path)) {
+      data = originals.get(path.split("/").at(-1)!)
+      if (!data) return Response.json({ _tag: "SessionNotFoundError", message: "Missing", sessionID }, { status: 404 })
+    } else if (/\/context$/.test(path)) {
+      data = messages.get(sessionID) ?? []
+    } else if (/\/compact$/.test(path)) {
+      data = { id: body.id }
+    } else if (/\/interrupt$/.test(path)) {
+      delete running[sessionID]
+      sessions.get(sessionID)!.outcome = "interrupted"
+      data = { interrupted: true }
     } else if (/\/permission\/[^/]+\/reply$/.test(path)) {
       expect(["once", "always", "reject"]).toContain(body.decision)
       permissions.set(sessionID, [])
@@ -112,10 +133,12 @@ function fixture() {
     const result = method === "getMe" ? { id: 999, is_bot: true, first_name: "Agent", username: "fixturebot" }
       : method === "getFile" ? { file_id: "image", file_unique_id: "image", file_path: "photos/image.png" }
       : method === "getWebhookInfo" ? { url: "", pending_update_count: 0 }
-      : method === "sendMessage" ? { message_id: telegram.length, date: 0, chat: { id: 42, type: "private" }, text: "" } : true
+      : ["sendMessage", "sendDocument", "sendPhoto"].includes(method) ? { message_id: telegram.length, date: 0, chat: { id: 42, type: "private" }, text: "" } : true
     return { ok: true, result } as never
   })
-  const gateway = new Gateway({ token: "999:fake", ownerID: 42, directory: "/agent/workspace" }, store, client, api, 0)
+  const home = mkdtempSync("/tmp/opencode/agent-gateway-test-")
+  homes.push(home)
+  const gateway = new Gateway({ token: "999:fake", ownerID: 42, directory: "/agent/workspace" }, store, client, api, 0, home)
   gateway.images.fetchFile = Object.assign(async () => new Response(png), { preconnect: fetch.preconnect })
   return { gateway, store, calls, telegram, sessions, messages, forms, permissions, admissions, running, models, failNextAdmission: () => { failAdmission = true } }
 }
@@ -167,8 +190,14 @@ test("image documents use byte detection and a display filename", async () => {
   await f.gateway.handle(update)
   expect(f.calls.find(c => c.path.endsWith("/prompt"))!.body.files).toEqual([{ uri: `data:image/png;base64,${png.toString("base64")}`, name: "screenshot.png" }])
   f.gateway.images.fetchFile = Object.assign(async () => new Response("%PDF-1.0"), { preconnect: fetch.preconnect })
-  await expect(f.gateway.handle(update)).rejects.toThrow("Unsupported image format")
-  expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(1)
+  update.update_id = 2
+  update.message!.message_id = 2
+  await f.gateway.handle(update)
+  const prompt = f.calls.filter(c => c.path.endsWith("/prompt")).at(-1)!
+  expect(prompt.body.files).toBeUndefined()
+  expect(prompt.body.text).toContain(f.gateway.home)
+  expect(prompt.body.text).toContain("screenshot.png")
+  expect(prompt.body.text).not.toContain("999:fake")
 })
 
 test("oversized images are rejected before download and while reading an undeclared stream", async () => {
@@ -366,8 +395,9 @@ test("session pages collapse to the selected session in one message", async () =
   expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(1)
 })
 
-test("busy and idle checks add no chat messages or status edits", async () => {
+test("progress can be disabled for typing-only behavior", async () => {
   const f = fixture()
+  f.gateway.settings.progress = false
   const id = await f.gateway.newSession(1)
   // Existing installations can contain an old status message record.
   f.store.set(`status:${id}`, { id: 123, text: "Working", busy: true })
@@ -384,6 +414,207 @@ test("status resolves the upstream default model instead of hiding it behind a p
   await f.gateway.handle(message(1, "/status"))
   expect(picker(f).text).toContain("Model: provider/model-0")
   expect(picker(f).text).not.toContain("ses_tg_")
+})
+
+test("one small status follows tool activity and becomes the final response", async () => {
+  const f = fixture()
+  await f.gateway.handle(message(1, "Do work"))
+  const id = f.store.get<string>("active")!
+  f.running[id] = { type: "running" }
+  await f.gateway.reconcile()
+  const statusID = picker(f).messageID
+  expect(picker(f).text).toBe("Thinking.")
+  f.gateway.onEvent({ type: "session.tool.input.started", data: { sessionID: id, name: "shell" } } as OpenCodeEvent)
+  await f.gateway.reconcile()
+  expect(picker(f)).toMatchObject({ messageID: statusID, text: "Running shell." })
+  const model = { providerID: "provider", id: "model-0" }
+  f.messages.set(id, [
+    { id: "msg_preamble", type: "assistant", agent: "build", model, time: { created: 1, completed: 2 }, content: [{ type: "text", text: "I will inspect the files." }], finish: "tool-calls" },
+    { id: "msg_result", type: "assistant", agent: "build", model, time: { created: 3, completed: 4 }, content: [{ type: "text", text: "The work is complete." }], finish: "stop" },
+  ])
+  delete f.running[id]
+  await f.gateway.reconcile()
+  await f.gateway.reconcile()
+  expect(picker(f)).toMatchObject({ messageID: statusID, text: "The work is complete." })
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(1)
+  expect(f.telegram.some(t => t.payload.text === "I will inspect the files.")).toBe(false)
+  expect(f.store.get(`progress:${id}`)).toBeUndefined()
+})
+
+test("concurrent status writers share one message and final delivery resolves the queued status ID", async () => {
+  const f = fixture()
+  await Promise.all([
+    f.gateway.telegram.status("session", "Thinking."),
+    f.gateway.telegram.status("session", "Thinking."),
+    f.gateway.telegram.finish("session", "Final response.", "final-one"),
+  ])
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(1)
+  expect(picker(f).text).toBe("Final response.")
+  expect(f.store.get("progress:session")).toBeUndefined()
+  await f.gateway.telegram.status("session", "Working on another task.")
+  const current = f.store.get<{ id: number; text: string }>("progress:session")
+  await f.gateway.telegram.finish("session", "Final response.", "final-one")
+  expect(f.store.get<{ id: number; text: string }>("progress:session")).toEqual(current)
+})
+
+test("file responses upload once and remove their markers from Telegram text", async () => {
+  const f = fixture()
+  const id = await f.gateway.newSession(1)
+  const path = join(f.gateway.home, "report.txt")
+  await Bun.write(path, "Report content")
+  f.messages.set(id, [{ id: "msg_files", type: "assistant", agent: "build", model: { providerID: "provider", id: "model-0" }, time: { created: 1, completed: 2 }, content: [{ type: "text", text: `Your report.\nMEDIA:${path}` }], finish: "stop" }])
+  await f.gateway.reconcile()
+  await f.gateway.reconcile()
+  expect(f.telegram.filter(t => t.method === "sendDocument")).toHaveLength(1)
+  expect(f.telegram.filter(t => t.method === "sendMessage").map(t => t.payload.text)).toEqual(["Your report."])
+})
+
+test("voice admission stays with its original session and survives a gateway reconstruction", async () => {
+  const f = fixture()
+  const input = message(1, "")
+  delete input.message!.text
+  input.message!.voice = { file_id: "voice", file_unique_id: "voice", duration: 2, mime_type: "audio/ogg" }
+  f.gateway.images.fetchFile = Object.assign(async () => new Response("voice bytes"), { preconnect: fetch.preconnect })
+  await f.gateway.handle(input)
+  const originalSession = f.store.get<string>("active")!
+  await f.gateway.newSession(2)
+  const restored = new Gateway(f.gateway.config, f.store, f.gateway.client, f.gateway.api, 0, f.gateway.home)
+  let transcriptions = 0
+  restored.transcribe = async () => { transcriptions++; return "Remember my appointment." }
+  f.failNextAdmission()
+  await expect(restored.processVoice()).rejects.toThrow("Transport")
+  await restored.processVoice()
+  const prompts = f.calls.filter(c => c.path.endsWith("/prompt"))
+  expect(prompts).toHaveLength(2)
+  expect(prompts[0]!.path).toContain(originalSession)
+  expect(prompts[1]!.body).toEqual(prompts[0]!.body)
+  expect(prompts[0]!.body.text).toContain("Remember my appointment.")
+  expect(f.admissions.size).toBe(1)
+  expect(transcriptions).toBe(1)
+  expect(f.store.entries("voice-input:")).toHaveLength(0)
+})
+
+test("stop remains available during voice transcription and prevents later admission", async () => {
+  const f = fixture()
+  const input = message(1, "")
+  delete input.message!.text
+  input.message!.voice = { file_id: "voice", file_unique_id: "voice", duration: 2 }
+  f.gateway.images.fetchFile = Object.assign(async () => new Response("voice bytes"), { preconnect: fetch.preconnect })
+  await f.gateway.handle(input)
+  let release!: (value: string) => void
+  let started!: () => void
+  const ready = new Promise<void>(resolve => { started = resolve })
+  f.gateway.transcribe = () => { started(); return new Promise(resolve => { release = resolve }) }
+  const work = f.gateway.processVoice()
+  await ready
+  await f.gateway.handle(message(2, "/stop"))
+  release("This request was cancelled.")
+  await work
+  expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(0)
+})
+
+test("local voice timeouts report once and remove the pending request", async () => {
+  const f = fixture()
+  const input = message(1, "")
+  delete input.message!.text
+  input.message!.voice = { file_id: "voice", file_unique_id: "voice", duration: 2 }
+  f.gateway.images.fetchFile = Object.assign(async () => new Response("voice bytes"), { preconnect: fetch.preconnect })
+  await f.gateway.handle(input)
+  let calls = 0
+  f.gateway.transcribe = async () => { calls++; throw new Error("Voice decoder timeout.") }
+  await f.gateway.processVoice()
+  await f.gateway.processVoice()
+  expect(calls).toBe(1)
+  expect(f.store.entries("voice-input:")).toHaveLength(0)
+  expect(picker(f).text).toContain("Voice decoder timeout")
+})
+
+test("failed execution produces one error and one retry action across repeated reconciliation", async () => {
+  const f = fixture()
+  await f.gateway.handle(message(1, "Do the task"))
+  const id = f.store.get<string>("active")!
+  f.sessions.get(id)!.outcome = "failed"
+  f.messages.set(id, [{ id: "msg_error", type: "assistant", agent: "build", model: { providerID: "provider", id: "model-0" }, time: { created: 1, completed: 2 }, content: [], error: { type: "provider", message: "Provider unavailable." } }])
+  for (let attempt = 0; attempt < 4; attempt++) await f.gateway.reconcile()
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(1)
+  expect(picker(f).text).toContain("Provider unavailable")
+  expect(f.store.db.query<{ count: number }, []>("SELECT count(*) AS count FROM actions").get()?.count).toBe(1)
+})
+
+test("final-looking text waits for the native execution to end", async () => {
+  const f = fixture()
+  await f.gateway.handle(message(1, "Do the task"))
+  const id = f.store.get<string>("active")!
+  f.running[id] = { type: "running" }
+  f.messages.set(id, [{ id: "msg_final", type: "assistant", agent: "build", model: { providerID: "provider", id: "model-0" }, time: { created: 1, completed: 2 }, content: [{ type: "text", text: "Complete." }], finish: "stop" }])
+  await f.gateway.reconcile()
+  expect(picker(f).text).toBe("Thinking.")
+  delete f.running[id]
+  await f.gateway.reconcile()
+  expect(picker(f).text).toBe("Complete.")
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(1)
+})
+
+test("retry wakes the failed execution with the original message ID and adds no new input", async () => {
+  const f = fixture()
+  await f.gateway.handle(message(1, "Do this task"))
+  const id = f.store.get<string>("active")!
+  f.sessions.get(id)!.outcome = "failed"
+  await f.gateway.handle(message(2, "/retry"))
+  const prompts = f.calls.filter(c => c.path.endsWith("/prompt"))
+  expect(prompts).toHaveLength(2)
+  expect(prompts[1]!.body).toMatchObject({ id: prompts[0]!.body.id, text: "Do this task", resume: true })
+  expect(f.admissions.size).toBe(1)
+  f.running[id] = { type: "running" }
+  await expect(f.gateway.retry(id)).rejects.toThrow("still working")
+})
+
+test("usage distinguishes cumulative totals from the latest request context", async () => {
+  const f = fixture()
+  const id = await f.gateway.newSession(1)
+  f.sessions.get(id)!.tokens = { input: 50000, output: 10000, reasoning: 0, cache: { read: 20000, write: 0 } }
+  f.messages.set(id, [{ id: "msg_usage", type: "assistant", agent: "build", model: { providerID: "provider", id: "model-0" }, time: { created: 1, completed: 2 }, tokens: { input: 1000, output: 100, reasoning: 50, cache: { read: 500, write: 0 } }, content: [], finish: "stop" }])
+  await f.gateway.handle(message(2, "/usage"))
+  expect(picker(f).text).toContain("input 50000")
+  expect(picker(f).text).toContain("1650 tokens (2% of 100000)")
+  await f.gateway.handle(message(3, "/compact"))
+  const request = f.calls.find(c => c.path.endsWith("/compact"))!
+  expect(request.body).toEqual({ id: "msg_tg_compact_42_3", delivery: "queue" })
+})
+
+test("scheduled submission retries use stable native IDs and leave the selected chat session unchanged", async () => {
+  const f = fixture()
+  const active = await f.gateway.newSession(1)
+  const jobs = new Schedules(":memory:")
+  try {
+    const now = Date.now()
+    const job = jobs.create({ name: "Report", prompt: "Send my report.", schedule: { at: new Date(now - 1000).toISOString() }, timezone: "UTC", directory: "/work" }, now - 2000)
+    f.failNextAdmission()
+    await expect(f.gateway.runScheduled(jobs)).rejects.toThrow("Transport")
+    await f.gateway.runScheduled(jobs)
+    const prompts = f.calls.filter(c => c.path.endsWith("/prompt"))
+    expect(prompts).toHaveLength(2)
+    expect(prompts[0]!.body).toEqual(prompts[1]!.body)
+    expect(f.admissions.size).toBe(1)
+    expect(f.store.get<string>("active")).toBe(active)
+    expect(jobs.pending()).toHaveLength(0)
+    expect(jobs.get(job.id).last?.state).toBe("submitted")
+  } finally { jobs.close() }
+})
+
+test("recurring jobs skip a new occurrence while their previous session is active", async () => {
+  const f = fixture()
+  const jobs = new Schedules(":memory:")
+  try {
+    const now = Math.floor(Date.now() / 60_000) * 60_000
+    const job = jobs.create({ name: "Long job", prompt: "Do some work.", schedule: { cron: "* * * * *" }, timezone: "UTC", directory: "/work" }, now - 120_000)
+    const first = jobs.claim(now - 60_000)[0]!
+    jobs.complete(first)
+    f.running[first.sessionID] = { type: "running" }
+    await f.gateway.runScheduled(jobs)
+    expect(jobs.get(job.id).last).toMatchObject({ state: "skipped", sessionID: first.sessionID })
+    expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(0)
+  } finally { jobs.close() }
 })
 
 describe("owner boundary", () => {

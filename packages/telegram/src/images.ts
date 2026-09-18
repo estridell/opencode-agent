@@ -20,8 +20,15 @@ export class Images {
   constructor(readonly api: Api, readonly token: string) {}
 
   async attachment(message: Message): Promise<NonNullable<SessionPromptInput["files"]>[number]> {
+    const { bytes, name } = await this.download(message)
+    const mime = imageType(bytes)
+    if (!mime) throw new Error(formatError)
+    return { uri: `data:${mime};base64,${bytes.toString("base64")}`, name }
+  }
+
+  async download(message: Message): Promise<{ bytes: Buffer; name: string }> {
     const photo = message.photo?.reduce((best, item) => item.width * item.height > best.width * best.height ? item : best)
-    const input = photo ?? message.document
+    const input = photo ?? message.document ?? message.voice
     if (!input) throw new Error(formatError)
     if (input.file_size && input.file_size > imageLimit) throw new Error(sizeError)
     const file = await this.api.getFile(input.file_id).catch(error => {
@@ -63,10 +70,9 @@ export class Images {
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
     const bytes = Buffer.concat(chunks, length)
     const mime = imageType(bytes)
-    if (!mime) throw new Error(formatError)
-    const extension = mime === "image/jpeg" ? "jpg" : mime.slice(6)
+    const extension = mime === "image/jpeg" ? "jpg" : mime?.slice(6) ?? "bin"
     const name = photo ? `photo-${message.message_id}.${extension}`
-      : message.document?.file_name?.split(/[\\/]/).pop()?.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200) || `image-${message.message_id}.${extension}`
-    return { uri: `data:${mime};base64,${bytes.toString("base64")}`, name }
+      : message.document?.file_name?.split(/[\\/]/).pop()?.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200) || (message.voice ? `voice-${message.message_id}.ogg` : `image-${message.message_id}.${extension}`)
+    return { bytes, name: name === "." || name === ".." ? "attachment.bin" : name }
   }
 }

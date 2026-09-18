@@ -2,17 +2,22 @@ import { Api, GrammyError } from "grammy"
 import type { Update } from "grammy/types"
 import type { ModelRef, OpenCodeEvent, SessionInfo, SessionMessageAssistant } from "@opencode/client"
 import { setTimeout as sleep } from "node:timers/promises"
-import type { Config } from "./config"
-import { errorText } from "./config"
+import type { Config, Settings } from "./config"
+import { agentHome, errorText, loadSettings, parseSettings } from "./config"
 import { connect, isNotFound, type Client } from "./opencode"
 import { Store, type Action, type TrackedSession } from "./store"
 import { Telegram } from "./telegram"
 import { Forms } from "./forms"
 import { Pickers, type Choice } from "./pickers"
 import { startUpdate } from "./update"
-import { Images } from "./images"
+import { Images, imageType } from "./images"
+import { cacheAttachment, responseAttachments } from "./attachments"
+import { transcribeVoice } from "./voice"
+import { Schedules, jobSession } from "./schedules"
+import { join } from "node:path"
 
 type Defaults = { model?: ModelRef; agent?: string }
+type VoiceInput = { sessionID: string; messageID: string; path: string; caption?: string; updateID: number }
 const modelLabel = (model: ModelRef) => `${model.providerID}/${model.id}${model.variant ? ` (${model.variant})` : ""}`
 
 export const commands = [
@@ -20,12 +25,15 @@ export const commands = [
   { command: "sessions", description: "Resume a Telegram session" },
   { command: "stop", description: "Interrupt the active session" },
   { command: "status", description: "Show the current session" },
+  { command: "usage", description: "Show token usage and context estimate" },
+  { command: "compact", description: "Compact the current context" },
+  { command: "retry", description: "Retry the failed request" },
   { command: "model", description: "Choose a model (optional search text)" },
   { command: "agent", description: "Choose an agent" },
   { command: "update", description: "Update the application and OpenCode" },
   { command: "help", description: "Show commands and usage" },
 ]
-const help = `**OpenCode Agent**\nSend text or an image. Add a caption to ask about the image. New messages give instructions to the task in progress.\n\n/new [title] - create a session\n/sessions - select a previous bot session\n/stop - stop work in the selected session\n/status - show the session, model, and directory\n/model [search] - select a model and variant\n/agent - select an agent\n/update - update the application and OpenCode\n/help - show this message\n\nImages: PNG, JPEG, GIF, or WebP, up to 20 MiB each. Use a model with image input.\nTo answer a question, reply with text or use its buttons.\n\nThis is an unofficial community project. It is not affiliated with the OpenCode team.`
+const help = `**OpenCode Agent**\nSend text, files, images, or an English voice message. New messages give instructions to the task in progress.\n\n/new [title] - create a session\n/sessions - select a previous bot session\n/stop - stop work in the selected session\n/status - show the session, model, and directory\n/usage - show usage and context estimate\n/compact - compact the current context\n/retry - retry a failed request\n/model [search] - select a model and variant\n/agent - select an agent\n/update - update the application and OpenCode\n/help - show this message\n\nIncoming files: up to 20 MiB each. Use a model with image input for images.\nAsk in chat to remember information, find an earlier conversation, or manage scheduled tasks.\nTo answer a question, reply with text or use its buttons.\n\nThis is an unofficial community project. It is not affiliated with the OpenCode team.`
 
 export function authorized(update: Update, ownerID: number): boolean {
   const message = update.message ?? update.callback_query?.message
@@ -39,13 +47,18 @@ export class Gateway {
   readonly pickers: Pickers
   readonly images: Images
   requestUpdate = startUpdate
+  transcribe = transcribeVoice
+  settings: Settings
   private dirty = true
   private known = new Set<string>()
-  constructor(readonly config: Config, readonly store: Store, public client: Client, readonly api = new Api(config.token), spacing = 1050) {
+  private activity = new Map<string, string>()
+  private voiceTask?: { sessionID: string; controller: AbortController }
+  constructor(readonly config: Config, readonly store: Store, public client: Client, readonly api = new Api(config.token), spacing = 1050, readonly home = agentHome()) {
     this.telegram = new Telegram(api, config.ownerID, store, spacing)
     this.forms = new Forms(() => this.client, store, this.telegram)
     this.pickers = new Pickers(store, this.telegram)
     this.images = new Images(api, config.token)
+    this.settings = parseSettings(config)
     for (const s of store.sessions()) this.known.add(s.id)
   }
 
@@ -94,7 +107,7 @@ export class Gateway {
     if (update.callback_query) {
       const query = update.callback_query
       const action = this.store.action(query.data ?? "")
-      const interaction = action?.kind === "permission" || action?.kind.startsWith("form-")
+      const interaction = action?.kind === "permission" || action?.kind === "retry" || action?.kind.startsWith("form-")
       if (!action || !this.known.has(action.sessionID) || (!interaction && !this.pickers.current(action, query.message?.message_id))) {
         await this.api.answerCallbackQuery(query.id, { text: "This menu has expired. Open the command again." }).catch(() => {})
         return
@@ -112,9 +125,9 @@ export class Gateway {
     }
     const message = update.message!
     const respond = (text: string) => this.telegram.send(text, undefined, `update:${update.update_id}`)
-    const hasImage = !!message.photo?.length || !!message.document
-    if (!message.text && !hasImage) return respond("Send text or a PNG, JPEG, GIF, or WebP image.")
-    const text = message.text ?? message.caption ?? "Analyze the attached image."
+    const hasFile = !!message.photo?.length || !!message.document || !!message.voice
+    if (!message.text && !hasFile) return respond("Send text, a file, an image, or a voice message.")
+    let text = message.text ?? message.caption ?? (message.photo?.length ? "Analyze the attached image." : "Use the attached file.")
     const command = message.text && /^\/(\w+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(message.text)
     if (command) {
       const name = command[1]!.toLowerCase()
@@ -137,9 +150,25 @@ export class Gateway {
       if (name === "model") return this.modelMenu(sessionID, arg, 0)
       if (name === "agent") return this.agentMenu(sessionID)
       if (name === "stop") {
+        if (this.voiceTask?.sessionID === sessionID) this.voiceTask.controller.abort()
+        for (const pending of this.store.entries<VoiceInput>("voice-input:")) if (pending.value.sessionID === sessionID) {
+          this.store.delete(pending.key)
+          this.store.delete(`voice-transcript:${pending.value.messageID}`)
+        }
         await this.client.session.interrupt({ sessionID, resume: false })
         await respond("Interrupted the active session.")
         this.dirty = true
+        return
+      }
+      if (name === "usage") return respond(await this.usage(sessionID))
+      if (name === "compact") {
+        await this.client.session.compact({ sessionID, id: `msg_tg_compact_${this.config.ownerID}_${update.update_id}`, delivery: "queue" })
+        this.activity.set(sessionID, "Compacting context.")
+        this.dirty = true
+        return respond("Context compaction requested.")
+      }
+      if (name === "retry") {
+        await this.retry(sessionID)
         return
       }
       if (name === "status") {
@@ -151,20 +180,105 @@ export class Gateway {
       return respond("Unknown command. Use /help.")
     }
     const reply = message.reply_to_message && this.store.get<Action>(`form-reply:${message.reply_to_message.message_id}`)
-    if (reply && hasImage) return respond("Reply with text to answer this question. Send the image as a separate message.")
+    if (reply && hasFile) return respond("Reply with text to answer this question. Send the file as a separate message.")
     if (reply) { await this.forms.act({ ...reply, kind: "form-value" }, text); this.dirty = true; return }
     // Remember routing before admission, so a redelivered Telegram update cannot target a newly selected session.
     const route = `input:${update.update_id}`
     const sessionID = this.store.get<string>(route) ?? await this.active(update.update_id)
     this.store.set(route, sessionID)
-    const files = hasImage ? [await this.images.attachment(message)] : undefined
+    const messageID = `msg_tg_${this.store.get<string>("binding")!.replaceAll(":", "_")}_${message.message_id}`
+    let files: Awaited<ReturnType<Images["attachment"]>>[] | undefined
+    if (message.photo?.length) files = [await this.images.attachment(message)]
+    else if (message.document || message.voice) {
+      if (message.voice && !this.settings.voice.enabled) return respond("Voice transcription is disabled. Send text or enable voice.enabled.")
+      const { bytes, name } = await this.images.download(message)
+      const mime = imageType(bytes)
+      if (message.document && mime) {
+        files = [{ uri: `data:${mime};base64,${bytes.toString("base64")}`, name }]
+        if (!message.caption) text = "Analyze the attached image."
+      } else {
+        const path = await cacheAttachment(this.home, name, bytes)
+        if (message.voice) {
+          this.store.set(`voice-input:${update.update_id}`, { sessionID, messageID, path, caption: message.caption, updateID: update.update_id } satisfies VoiceInput)
+          this.activity.set(sessionID, "Transcribing voice.")
+          this.dirty = true
+          return
+        }
+        text += `\n\nAttached file on the agent machine: ${JSON.stringify(path)}. Use the native tools to read or process this file.`
+      }
+    }
+    this.store.set(`last-input:${sessionID}`, messageID)
     await this.client.session.prompt({
       sessionID,
-      id: `msg_tg_${this.store.get<string>("binding")!.replaceAll(":", "_")}_${message.message_id}`,
+      id: messageID,
       text, ...(files ? { files } : {}), delivery: "steer", metadata: { transport: "telegram", updateID: update.update_id },
     })
+    this.activity.set(sessionID, "Thinking.")
     void this.telegram.typing()
     this.dirty = true
+  }
+
+  async processVoice(signal?: AbortSignal) {
+    for (const { key, value } of this.store.entries<VoiceInput>("voice-input:")) {
+      if (signal?.aborted) return
+      if (this.settings.progress) await this.telegram.status(value.sessionID, "Transcribing voice.")
+      const controller = new AbortController()
+      this.voiceTask = { sessionID: value.sessionID, controller }
+      let submitting = false
+      try {
+        const transcriptKey = `voice-transcript:${value.messageID}`
+        let transcript = this.store.get<string>(transcriptKey)
+        if (transcript === undefined) {
+          transcript = await this.transcribe(this.home, value.path, this.settings.voice, signal ? AbortSignal.any([signal, controller.signal]) : controller.signal)
+          if (!this.store.get(key)) continue
+          this.store.set(transcriptKey, transcript)
+        }
+        if (!transcript.trim()) throw new Error("No speech was detected. Send the message again or use text.")
+        if (!this.store.get(key)) continue
+        this.store.set(`last-input:${value.sessionID}`, value.messageID)
+        submitting = true
+        await this.client.session.prompt({ sessionID: value.sessionID, id: value.messageID, text: `${value.caption ? value.caption + "\n\n" : ""}[Voice message transcription]\n${transcript}`, delivery: "steer", metadata: { transport: "telegram", updateID: value.updateID } })
+        this.store.delete(key)
+        this.store.delete(transcriptKey)
+        this.activity.set(value.sessionID, "Thinking.")
+      } catch (error) {
+        if (signal?.aborted) return
+        if (!this.store.get(key)) continue
+        if (submitting && /Transport|fetch|connect|timeout/i.test(`${(error as Error).name} ${(error as Error).message}`)) throw error
+        await this.telegram.finish(value.sessionID, errorText(error, [this.config.token]), `voice-error:${value.messageID}`)
+        this.store.delete(key)
+        this.store.delete(`voice-transcript:${value.messageID}`)
+      } finally { this.voiceTask = undefined }
+      this.dirty = true
+    }
+  }
+
+  async retry(sessionID: string, expectedID?: string) {
+    const session = await this.client.session.get({ sessionID })
+    if ((await this.client.session.active())[sessionID]) throw new Error("This session is still working.")
+    if (session.outcome !== "failed") throw new Error("This session has no failed request to retry.")
+    const messageID = this.store.get<string>(`last-input:${sessionID}`)
+    if (!messageID || (expectedID && expectedID !== messageID)) throw new Error("This retry no longer matches the failed request.")
+    const original = await this.client.session.message.get({ sessionID, messageID })
+    if (original.type !== "user") throw new Error("The original request is no longer available.")
+    await this.client.session.prompt({ sessionID, id: original.id, text: original.text, resume: true })
+    this.activity.set(sessionID, "Thinking.")
+    this.dirty = true
+  }
+
+  async usage(sessionID: string) {
+    const session = await this.client.session.get({ sessionID })
+    const tokens = session.tokens
+    const lines = [`Session tokens: input ${tokens.input ?? 0}, output ${tokens.output ?? 0}, reasoning ${tokens.reasoning ?? 0}.`, `Cache tokens: read ${tokens.cache?.read ?? 0}, write ${tokens.cache?.write ?? 0}.`, `Recorded cost: $${(session.cost ?? 0).toFixed(4)}.`]
+    const context = await this.client.session.context({ sessionID })
+    const latest = [...context].reverse().find(m => m.type === "assistant" && m.tokens)
+    if (latest?.type === "assistant" && latest.tokens) {
+      const t = latest.tokens
+      const used = t.input + t.output + t.reasoning + t.cache.read + t.cache.write
+      const model = (await this.client.model.list({ location: session.location })).data.find(m => m.providerID === latest.model.providerID && m.id === latest.model.id)
+      lines.push(`Last request context estimate: ${used} tokens${model?.limit.context ? ` (${Math.round(used / model.limit.context * 100)}% of ${model.limit.context})` : ""}.`)
+    } else lines.push("Context estimate is not available yet.")
+    return lines.join("\n")
   }
 
   private button(label: string, action: Action) { return { text: label.slice(0, 60), callback_data: this.store.button(action) } }
@@ -203,6 +317,7 @@ export class Gateway {
 
   async callback(action: Action) {
     const { sessionID } = action
+    if (action.kind === "retry") return this.retry(sessionID, action.value)
     if (action.kind.startsWith("form-")) {
       const result = await this.forms.act(action)
       if (result) await this.telegram.send(result, undefined, undefined, true)
@@ -279,14 +394,23 @@ export class Gateway {
       if (event.type === "session.created" && event.data.parentID && this.known.has(event.data.parentID)) this.dirty = true
       return
     }
+    switch (event.type) {
+      case "session.execution.started":
+      case "session.step.started":
+      case "session.reasoning.started": this.activity.set(id, "Thinking."); break
+      case "session.tool.input.started": this.activity.set(id, `Running ${event.data.name.replace(/[^\w .-]/g, " ").slice(0, 60)}.`); break
+      case "session.compaction.started": this.activity.set(id, "Compacting context."); break
+      case "session.retry.scheduled": this.activity.set(id, "Waiting to retry."); break
+    }
     this.dirty = true
   }
 
-  private async messages(session: TrackedSession) {
+  private async messages(session: TrackedSession, failureKey?: string) {
     const checkpoint = this.store.get<string>(`checkpoint:${session.id}`)
     const pending: SessionMessageAssistant[] = []
     let cursor: string | undefined
     let found = false
+    let completed = false
     do {
       const page = await this.client.message.list({ sessionID: session.id, type: "assistant", limit: 100, ...(cursor ? { cursor } : { order: "desc" as const }) })
       for (const m of page.data) {
@@ -295,20 +419,37 @@ export class Gateway {
       }
       cursor = page.cursor.next ?? undefined
     } while (cursor && !found)
+    const newestID = pending[0]?.id
     for (const m of pending.reverse()) {
       if (!m.time.completed) break
-      const text = m.content.filter(c => c.type === "text").map(c => c.text).join("\n\n")
-      if (text.trim()) {
-        const prefix = this.store.get("active") === session.id ? "" : `**${session.title}**\n\n`
-        await this.telegram.send(prefix + text, undefined, `message:${session.id}:${m.id}`, m.finish === "tool-calls")
+      const result = responseAttachments(m.content.filter(c => c.type === "text").map(c => c.text).join("\n\n"))
+      if (m.finish === "tool-calls" && !m.error) {
+        this.store.set(`checkpoint:${session.id}`, m.id)
+        continue
       }
-      if (m.error) await this.telegram.send(`OpenCode error: ${errorText(m.error, [this.config.token])}`, undefined, `error:${session.id}:${m.id}`)
+      completed = true
+      if (result.text && !m.error) {
+        const prefix = this.store.get("active") === session.id ? "" : `**${session.title}**\n\n`
+        await this.telegram.finish(session.id, prefix + result.text, `message:${session.id}:${m.id}`)
+      }
+      for (const [index, path] of result.paths.entries()) await this.telegram.file(path, `file:${session.id}:${m.id}:${index}`)
+      if (!m.error && !result.text && result.paths.length && this.store.get(`progress:${session.id}`)) await this.telegram.finish(session.id, "File response complete.", `file-status:${session.id}:${m.id}`)
+      if (m.error) {
+        const key = failureKey && m.id === newestID ? failureKey : `error:${session.id}:${m.id}`
+        if (!this.store.sent(`${key}:0`)) {
+          const originalID = this.store.get<string>(`last-input:${session.id}`)
+          const keyboard = originalID ? [[this.button("Retry", { kind: "retry", sessionID: session.id, value: originalID })]] : undefined
+          await this.telegram.finish(session.id, `${result.text ? result.text + "\n\n" : ""}OpenCode error: ${errorText(m.error, [this.config.token])}`, key, keyboard)
+        }
+      }
       this.store.set(`checkpoint:${session.id}`, m.id)
     }
+    return completed
   }
 
   async reconcile() {
     const running = await this.client.session.active()
+    const voices = new Set(this.store.entries<VoiceInput>("voice-input:").map(row => row.value.sessionID))
     // Children use the same owner routing for permission/question interactions.
     const queue = this.store.sessions().filter(s => !s.missing)
     for (const session of queue) {
@@ -352,11 +493,24 @@ export class Gateway {
         this.store.set(`permissions:${session.id}`, permissions.map(p => p.id))
         const forms = await this.forms.reconcile(session.id)
         if (tracked.parentID) continue
-        await this.messages({ ...tracked, title: session.title ?? tracked.title })
-        if (!running[session.id] && session.outcome === "failed") {
-          await this.telegram.send(`**${session.title ?? "OpenCode"}** failed. Check the error above, or open this session with opencode-agent to inspect it.`, undefined, `failed:${session.id}:${session.time.idle ?? session.time.updated}`)
+        const failureKey = `failed:${session.id}:${session.time.idle ?? session.time.updated}`
+        const completed = !running[session.id] && await this.messages({ ...tracked, title: session.title ?? tracked.title }, session.outcome === "failed" ? failureKey : undefined)
+        if (!running[session.id] && !voices.has(session.id) && session.outcome === "failed" && !this.store.sent(`${failureKey}:0`)) {
+          const originalID = this.store.get<string>(`last-input:${session.id}`)
+          const keyboard = originalID ? [[this.button("Retry", { kind: "retry", sessionID: session.id, value: originalID })]] : undefined
+          await this.telegram.finish(session.id, `**${session.title ?? "OpenCode"}** failed. Use /retry to retry the failed request.`, failureKey, keyboard)
         }
         if (this.store.get("active") === session.id && running[session.id] && !permissions.length && !forms.length) void this.telegram.typing()
+        if (running[session.id] || voices.has(session.id)) {
+          if (this.settings.progress && (!completed || voices.has(session.id))) {
+            const label = permissions.length && this.config.autoApprove === false ? "Waiting for permission." : forms.length ? "Waiting for your answer." : this.activity.get(session.id) ?? "Working."
+            const prefix = this.store.get("active") === session.id ? "" : `${session.title ?? "Scheduled task"}: `
+            await this.telegram.status(session.id, prefix + label)
+          }
+        } else {
+          this.activity.delete(session.id)
+          if (this.store.get(`progress:${session.id}`)) await this.telegram.finish(session.id, session.outcome === "interrupted" ? "Stopped." : "Done.", `idle:${session.id}:${session.time.idle ?? session.time.updated}`)
+        }
       } catch (error) {
         if (!isNotFound(error)) throw error
         this.store.track({ ...tracked, missing: true })
@@ -365,10 +519,41 @@ export class Gateway {
     }
   }
 
+  async runScheduled(jobs: Schedules) {
+    const active = await this.client.session.active()
+    for (const run of jobs.claim()) {
+      if (!jobs.current(run)) continue
+      if (run.job.last?.sessionID && active[run.job.last.sessionID]) { jobs.skipOverlap(run); continue }
+      try {
+        let session: SessionInfo
+        try { session = await this.client.session.get({ sessionID: run.sessionID }) }
+        catch (error) {
+          if (!isNotFound(error)) throw error
+          session = await this.client.session.create(jobSession(run))
+        }
+        this.track(session)
+        if (!jobs.current(run) || !this.settings.schedules.enabled) continue
+        const messageID = `msg_schedule_${run.id}`
+        this.store.set(`last-input:${session.id}`, messageID)
+        await this.client.session.prompt({ sessionID: session.id, id: messageID, text: run.job.prompt, metadata: { transport: "telegram", scheduleID: run.job.id, scheduledAt: run.due } })
+        jobs.complete(run)
+        this.activity.set(session.id, "Thinking.")
+        this.dirty = true
+      } catch (error) {
+        if (/Transport|fetch|connect|timeout/i.test(`${(error as Error).name} ${(error as Error).message}`)) throw error
+        const text = errorText(error, [this.config.token])
+        await this.telegram.send(`Scheduled task ${run.job.name} could not start: ${text}`, undefined, `schedule-error:${run.id}`)
+        jobs.complete(run, text)
+      }
+    }
+  }
+
   async run(signal: AbortSignal, reconnect: () => Promise<Client> = connect, onReady?: () => Promise<void>) {
     const shutdown = new AbortController()
     signal = AbortSignal.any([signal, shutdown.signal])
     await this.initialize()
+    const jobs = new Schedules(join(this.home, "schedules.sqlite"))
+    jobs.skipMissed()
     const log = (error: unknown) => console.error(errorText(error, [this.config.token]))
     const pause = async (ms: number) => { await sleep(ms, undefined, { signal }).catch(() => {}) }
     const events = async () => {
@@ -417,8 +602,28 @@ export class Gateway {
         }
       }
     }
-    const workers = [events(), reconcile(), poll()]
+    const schedule = async () => {
+      let enabled = this.settings.schedules.enabled
+      while (!signal.aborted) {
+        try {
+          this.settings = await loadSettings(this.home)
+          if (this.settings.schedules.enabled) {
+            if (!enabled) jobs.skipMissed()
+            await this.runScheduled(jobs)
+          }
+          enabled = this.settings.schedules.enabled
+        } catch (error) { if (!signal.aborted) log(error) }
+        await pause(2000)
+      }
+    }
+    const voice = async () => {
+      while (!signal.aborted) {
+        try { await this.processVoice(signal) } catch (error) { if (!signal.aborted) log(error) }
+        await pause(1500)
+      }
+    }
+    const workers = [events(), reconcile(), poll(), schedule(), voice()]
     try { await Promise.all(workers) }
-    finally { shutdown.abort(); await Promise.allSettled(workers) }
+    finally { shutdown.abort(); await Promise.allSettled(workers); jobs.close() }
   }
 }
