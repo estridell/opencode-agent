@@ -8,7 +8,7 @@ import { Service } from "@opencode/client/service"
 import { agentHome, errorText, loadConfig } from "./config"
 import { installedCliPath, unitName } from "./service"
 import { downloadRuntime, prepareRuntime, registrationFile, runtimeEnv, upstreamBinary } from "./runtime"
-import { installContextPlugin } from "./plugins"
+import { installPlugins } from "./plugins"
 import { OpenCode } from "@opencode/client"
 
 export type UpdateState = { id: string; phase: "running" | "done" | "failed"; text: string; time: number; messages?: string[] }
@@ -65,12 +65,64 @@ export function releaseVersion(value: unknown): string {
   return version
 }
 
-/** Compare effective installed files, including locally pinned dependency versions. */
-export async function pluginOnlyUpdate(current: string, next: string, runtimeChanged: boolean): Promise<boolean> {
+/** Fingerprint only the gateway's resolved dependency graph, not plugin or development dependencies. */
+export async function gatewayDependencies(root: string): Promise<string> {
+  const lock = Bun.JSON5.parse(await readFile(join(root, "bun.lock"), "utf8")) as {
+    lockfileVersion: number
+    workspaces: Record<string, { name: string; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>; peerDependencies?: Record<string, string> }>
+    packages: Record<string, [string, string?, { dependencies?: Record<string, string>; optionalDependencies?: Record<string, string>; peerDependencies?: Record<string, string> }?]>
+  }
+  if (lock.lockfileVersion !== 1) throw new Error("Unsupported Bun lockfile version.")
+  const graph = new Map<string, unknown>()
+  const visit = (name: string, from: string[], optional = false) => {
+    let key: string | undefined
+    for (let length = from.length; length >= 0; length--) {
+      const candidate = [...from.slice(0, length), name].join("/")
+      if (lock.packages[candidate]) { key = candidate; break }
+    }
+    if (!key) {
+      if (optional) return
+      throw new Error(`Missing gateway dependency: ${name}.`)
+    }
+    if (graph.has(key)) return
+    const entry = lock.packages[key]!
+    graph.set(key, entry)
+    const workspace = entry[0].split("@workspace:")[1]
+    const metadata = workspace ? lock.workspaces[workspace] : entry[2]
+    if (workspace) graph.set(`workspace:${workspace}`, metadata)
+    const parents = key.match(/(?:@[^/]+\/)?[^/]+/g)!
+    for (const dep of Object.keys(metadata?.dependencies ?? {})) visit(dep, parents)
+    for (const dep of Object.keys(metadata?.optionalDependencies ?? {})) visit(dep, parents, true)
+    if (metadata && "peerDependencies" in metadata) {
+      for (const dep of Object.keys(metadata.peerDependencies ?? {})) visit(dep, parents, true)
+    }
+  }
+  const gateway = lock.workspaces["packages/telegram"]
+  if (!gateway) throw new Error("The gateway is missing from the Bun lockfile.")
+  for (const name of Object.keys(gateway.dependencies ?? {})) visit(name, [gateway.name])
+  for (const name of Object.keys(gateway.optionalDependencies ?? {})) visit(name, [gateway.name], true)
+  for (const name of Object.keys(gateway.peerDependencies ?? {})) visit(name, [gateway.name], true)
+  const manifests = await Promise.all(["package.json", "packages/telegram/package.json"].map(async file => {
+    const manifest = JSON.parse(await readFile(join(root, file), "utf8"))
+    return Object.fromEntries(["type", "imports", "exports", ...(file.startsWith("packages/") ? ["dependencies", "optionalDependencies", "peerDependencies"] : [])]
+      .map(key => [key, manifest[key]]))
+  }))
+  const configText = await readFile(join(root, "tsconfig.json"), "utf8").catch(error => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    return "{}"
+  })
+  const config = Bun.JSON5.parse(configText) as { extends?: unknown; compilerOptions?: Record<string, unknown> }
+  // Bun reads these settings during execution; type-check-only settings need no restart.
+  const transforms = Object.fromEntries(["target", "module", "moduleResolution", "paths", "baseUrl", "jsx", "jsxFactory", "jsxFragmentFactory", "jsxImportSource", "experimentalDecorators", "emitDecoratorMetadata", "useDefineForClassFields", "verbatimModuleSyntax"]
+    .map(key => [key, config.compilerOptions?.[key]]))
+  return JSON.stringify([manifests, config.extends, transforms, [...graph].sort(([a], [b]) => a.localeCompare(b))])
+}
+
+/** Restart only for files or resolved dependencies used by the installed gateway. */
+export async function canUpdateWithoutRestart(current: string, next: string, runtimeChanged: boolean): Promise<boolean> {
   if (runtimeChanged) return false
   const inventories = await Promise.all([current, next].map(async directory =>
     (await command(["git", "ls-files", "-z"], directory)).split("\0").filter(Boolean)))
-  let contextChanged = false
   for (const file of new Set(inventories.flat())) {
     const read = async (root: string) => {
       const path = join(root, file)
@@ -84,11 +136,12 @@ export async function pluginOnlyUpdate(current: string, next: string, runtimeCha
     }
     const [before, after] = await Promise.all([read(current), read(next)])
     if (before === after) continue
-    if (file === "packages/plugins/context.ts" && before && after) { contextChanged = true; continue }
-    if (["README.md", "packages/plugins/README.md"].includes(file) || /^docs\/.*\.md$/.test(file) || /^packages\/telegram\/test\/.*\.ts$/.test(file)) continue
+    if (file.startsWith("packages/plugins/") || /^(docs|config|scripts|\.github)\//.test(file) || file.startsWith("packages/telegram/test/")) continue
+    if (/\.md$/.test(file) || ["package.json", "packages/telegram/package.json", "bun.lock", "tsconfig.json", ".gitignore", "LICENSE"].includes(file)) continue
     return false
   }
-  return contextChanged
+  try { return await gatewayDependencies(current) === await gatewayDependencies(next) }
+  catch { return false } // Unknown dependency layouts use the normal restart path.
 }
 
 export async function selectApplication(directory: string, home = agentHome()) {
@@ -214,7 +267,7 @@ export async function runUpdate(id: string, messageID?: number) {
         await report("Checking the application.")
         await run([process.execPath, "run", "check"], stage)
         await run([process.execPath, "test"], stage)
-        hot = await pluginOnlyUpdate(root, stage, runtimeChanged)
+        hot = await canUpdateWithoutRestart(root, stage, runtimeChanged)
         if (hot) {
           // Require a managed, healthy gateway before choosing the no-restart path.
           const currentPath = await realpath(join(agentHome(), "current")).catch(() => "")
@@ -269,10 +322,10 @@ export async function runUpdate(id: string, messageID?: number) {
       hot: {
         enabled: () => hot,
         activate: async () => {
-          await report("Updating the context plugin. Telegram and OpenCode remain running.")
+          await report("Applying updates. Telegram and OpenCode remain running.")
           await selectApplication(stage)
           selected = true
-          await installContextPlugin(runtimeEnv().XDG_CONFIG_HOME!, join(stage, "packages/plugins/context.ts"))
+          await installPlugins(runtimeEnv().XDG_CONFIG_HOME!, stage)
         },
         verify: async () => {
           const endpoint = await Service.discover({ file: registrationFile() })
@@ -288,11 +341,11 @@ export async function runUpdate(id: string, messageID?: number) {
         recover: async () => {
           if (!selected) return
           await selectApplication(root)
-          await installContextPlugin(runtimeEnv().XDG_CONFIG_HOME!, join(root, "packages/plugins/context.ts"))
+          await installPlugins(runtimeEnv().XDG_CONFIG_HOME!, root)
         },
       },
     })
-    await report(changed ? `Update complete.\nApplication: ${commit}\nOpenCode: ${version}\n${hot ? "Plugin files updated. Services kept running." : "Telegram connected."}` : `Already up to date.\nApplication: ${commit}\nOpenCode: ${version}`, "done")
+    await report(changed ? `Update complete.\nApplication: ${commit}\nOpenCode: ${version}\n${hot ? "Services kept running." : "Telegram connected."}` : `Already up to date.\nApplication: ${commit}\nOpenCode: ${version}`, "done")
   } catch (error) {
     await report(`Update failed.\n${errorText(error, [config.token])}\nLog: ${log}`, "failed")
     process.exitCode = 1

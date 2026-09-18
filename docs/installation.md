@@ -200,13 +200,13 @@ You can also send `/update` in the private Telegram chat.
 Both commands use the same update worker.
 The terminal shows each update stage.
 Telegram changes one message as the update progresses.
-The final result replaces that message after the gateway connects.
+The final result replaces that message after the update checks pass.
 
 The updater downloads `main` from the installed repository's `origin` remote.
 It prepares the application in `~/.opencode-agent/versions/<update-id>`.
 It installs project dependencies and the client that matches the latest OpenCode V2 release.
 It runs type checks and automated tests before activation.
-It then runs the new installer and replaces the generated service file.
+When a gateway restart is required, it runs the new installer and replaces the generated service file.
 The installer selects the private Bun version.
 
 The launcher and service use `~/.opencode-agent/current`, a link to the selected application directory.
@@ -216,9 +216,11 @@ Uncommitted changes in a development checkout do not enter the update.
 
 The worker restarts OpenCode when the runtime version changes.
 This restart can interrupt active tasks.
-Context-plugin-only updates keep Telegram and OpenCode running.
-OpenCode's file watcher automatically reloads the changed plugin.
-Changes to gateway code, dependencies, or the installer restart the Telegram gateway.
+Plugin additions, changes, renames, and removals keep Telegram and OpenCode running.
+OpenCode's file watcher automatically loads, reloads, and unloads these plugins.
+Documentation, tests, and development-only changes also keep services running.
+Plugin-only dependency changes keep services running when the gateway's resolved dependencies remain the same.
+Changes to gateway code, gateway dependencies, or the installer restart the Telegram gateway.
 An unchanged installation reports that it is up to date without a restart.
 
 Updates require the systemd user service.
@@ -229,7 +231,8 @@ Only one update can run for an agent directory.
 Update state and logs are in `~/.opencode-agent/updates/`.
 The installed application commit and runtime version are in `~/.opencode-agent/installed.json`.
 Preparation failures leave the running gateway unchanged.
-After a later failure, the updater tries to restart the selected installation and reports the error.
+After a restart-path failure, the updater tries to restart the selected installation and reports the error.
+After a no-restart activation failure, it restores the previous application and plugin set without restarting services.
 It does not automatically downgrade an OpenCode database after a runtime update.
 
 Use these commands after an update failure:
@@ -258,7 +261,8 @@ OPENCODE_AGENT_HOME=/tmp/opencode/agent-context-check bun run test:context
 
 The test uses a local simulated model endpoint and separate OpenCode data.
 It checks session scope, preserved base prompts, and plugin reload during an active model request.
-It also checks that the runtime process stays running and gateway reconnection preserves the new note.
+It also tests plugin additions, imports, package dependencies, data changes, renames, and removals.
+The runtime process stays running, and gateway reconnection preserves the selected plugin set.
 
 To test runtime replacement with temporary data, run:
 

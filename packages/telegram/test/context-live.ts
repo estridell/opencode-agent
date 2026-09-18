@@ -1,12 +1,12 @@
 import assert from "node:assert/strict"
-import { mkdir, readFile, readlink, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readlink, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { setTimeout as sleep } from "node:timers/promises"
 import { Service } from "@opencode/client/service"
 import { applicationContext } from "../../plugins/context"
 import { agentHome } from "../src/config"
 import { connect } from "../src/opencode"
-import { installContextPlugin } from "../src/plugins"
+import { installPlugins } from "../src/plugins"
 import { selectApplication } from "../src/update"
 import { installRuntime, prepareRuntime, registrationFile, runtimeEnv, upstreamBinary, workspace } from "../src/runtime"
 
@@ -65,7 +65,7 @@ try {
     assert.ok(requests.length, "No request reached the local provider.")
     const system = requests.at(-1)!.messages.filter(m => m.role === "system" || m.role === "developer").map(m => typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n")
     assert.ok(system.includes(base), "The upstream or custom base prompt must remain present.")
-    assert.equal(system.split(note).length - 1, expected ? 1 : 0)
+    assert.equal(system.split(note).length - 1, expected ? 1 : 0, `Unexpected plugin note: ${note}`)
   }
 
   await check(parent.id, true, "You are an AI agent running in OpenCode")
@@ -94,7 +94,7 @@ try {
   assert.ok(requests.length, "The model request must start before the plugin update.")
   await selectApplication(stage)
   selected = true
-  await installContextPlugin(runtimeEnv().XDG_CONFIG_HOME!)
+  await installPlugins(runtimeEnv().XDG_CONFIG_HOME!)
   await sleep(500)
   assert.ok(Object.hasOwn(await client.session.active(), parent.id), "Plugin reload must preserve the active request.")
   release()
@@ -113,7 +113,52 @@ try {
   const after = await Bun.file(registrationFile()).json()
   assert.equal(before.pid, after.pid)
   await check(parent.id, true, "Do not settle for a partial", revised)
-  console.log("Context plugin passed: session scope, preserved prompts, live reload during an active request, unchanged runtime process, and reconnect through the previous gateway module.")
+  const eventually = async (note: string, present: boolean) => {
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      try { await check(parent.id, present, "Do not settle for a partial", note); return }
+      catch (error) { if (!(error instanceof assert.AssertionError) || Date.now() >= deadline) throw error }
+      await sleep(100)
+    }
+  }
+  // A second plugin has its own package entrypoint, relative import, and data file.
+  const extra = join(stage, "packages/plugins/research")
+  await mkdir(extra, { recursive: true })
+  const dependency = join(extra, "node_modules/fixture-plugin-dependency")
+  await mkdir(dependency, { recursive: true })
+  await writeFile(join(dependency, "package.json"), '{"name":"fixture-plugin-dependency","version":"1.0.0","type":"module","main":"index.js"}')
+  await writeFile(join(dependency, "index.js"), 'export const suffix = " Package dependency loaded."\n')
+  await writeFile(join(extra, "package.json"), '{"main":"entry.js","dependencies":{"fixture-plugin-dependency":"1.0.0"}}')
+  await writeFile(join(extra, "note.json"), JSON.stringify({ text: "Research plugin revision one." }))
+  await writeFile(join(extra, "helper.js"), 'import data from "./note.json"; import { suffix } from "fixture-plugin-dependency"; export const note = data.text + suffix\n')
+  await writeFile(join(extra, "entry.js"), 'import { note } from "./helper.js"; export default { id: "fixture.research", async setup(ctx) { await ctx.session.hook("context", event => { event.system.push({ type: "text", text: note }) }) } }\n')
+  await installPlugins(runtimeEnv().XDG_CONFIG_HOME!)
+  await eventually("Research plugin revision one.", true)
+  await eventually("Package dependency loaded.", true)
+  await writeFile(join(extra, "note.json"), JSON.stringify({ text: "Research plugin revision two." }))
+  await eventually("Research plugin revision two.", true)
+  const renamed = join(stage, "packages/plugins/writing")
+  await rename(extra, renamed)
+  await installPlugins(runtimeEnv().XDG_CONFIG_HOME!)
+  const renameDeadline = Date.now() + 10_000
+  for (;;) {
+    const inventory = await client.plugin.list({ location })
+    if (inventory.data.some(plugin => plugin.id === "fixture.research" && plugin.state.status === "active" && plugin.source.type === "local" && plugin.source.path.endsWith("opencode-agent-package-writing.ts"))) break
+    assert.ok(Date.now() < renameDeadline, "The renamed plugin must become active.")
+    await sleep(100)
+  }
+  await eventually("Research plugin revision two.", true)
+  await rm(renamed, { recursive: true })
+  await installPlugins(runtimeEnv().XDG_CONFIG_HOME!)
+  await eventually("Research plugin revision two.", false)
+  await rm(join(stage, "packages/plugins/context.ts"))
+  await installPlugins(runtimeEnv().XDG_CONFIG_HOME!)
+  await eventually(revised, false)
+  // An old gateway's reconnect must preserve removals, including the original context plugin.
+  client = await connect()
+  await eventually(revised, false)
+  assert.equal(before.pid, (await Bun.file(registrationFile()).json()).pid)
+  console.log("Plugin lifecycle passed: addition, package dependencies and assets, changes, rename, removal, active requests, preserved prompts, unchanged runtime process, and gateway reconnection.")
 } finally {
   await Service.stop({ file: registrationFile() })
   await server.stop(true)

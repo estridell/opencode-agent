@@ -123,9 +123,11 @@ The update worker runs separately from the gateway.
 It continues if the gateway stops or you close the terminal.
 
 The updater prepares and checks a new application directory before activation.
-Context-plugin-only updates keep Telegram and OpenCode running.
-OpenCode automatically reloads the changed plugin.
-Gateway code, dependency, and installer changes restart the gateway.
+Plugin additions, changes, renames, and removals keep Telegram and OpenCode running.
+OpenCode automatically reloads the installed plugin set.
+Documentation, tests, and development-only changes also keep both services running.
+Plugin dependency changes require a gateway restart only when they also change the gateway's resolved dependencies.
+Gateway code, gateway dependencies, and installer changes restart the gateway.
 Runtime version changes restart both services.
 A runtime restart can interrupt active tasks.
 An unchanged installation does not restart.
@@ -170,7 +172,7 @@ See [Implementation](docs/implementation.md) for the design and current limits.
 | `config/` | Configuration example |
 | `docs/` | Installation and design documentation |
 | `packages/telegram/` | Terminal commands, setup, and Telegram gateway |
-| `packages/plugins/` | Application context plugin |
+| `packages/plugins/` | Bundled OpenCode plugins |
 | `scripts/` | Notes about script commands |
 
 ## Development

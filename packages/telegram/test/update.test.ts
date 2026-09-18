@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, readlink, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { applyUpdate, command, pluginOnlyUpdate, releaseVersion } from "../src/update"
+import { applyUpdate, command, canUpdateWithoutRestart, releaseVersion } from "../src/update"
 
 function steps(fail?: string) {
   const calls: string[] = []
@@ -60,17 +60,22 @@ test("failed plugin-only updates restore plugin files without restarting service
   expect(plan.calls).toEqual(["prepare", "hot activate", "hot recover"])
 })
 
-test("only context, documentation, and test changes qualify for a running-service update", async () => {
+test("plugin lifecycle and non-runtime changes keep services running; gateway changes require a restart", async () => {
   const directory = await mkdtemp("/tmp/opencode/agent-update-plan-")
   const current = join(directory, "current")
   const next = join(directory, "next")
   const files: Record<string, string> = {
     "packages/plugins/context.ts": "old context",
     "packages/telegram/src/gateway.ts": "gateway",
-    "packages/telegram/package.json": '{"client":"2.0.8"}',
+    "package.json": '{}',
+    "packages/telegram/package.json": '{"dependencies":{"api":"^1"}}',
     "install.sh": "installer",
-    "bun.lock": "lockfile",
+    "bun.lock": JSON.stringify({ lockfileVersion: 1, workspaces: { "packages/telegram": { name: "gateway", dependencies: { api: "^1" } } }, packages: {
+      api: ["api@1.0.0", "", { dependencies: { leaf: "^1" } }, "integrity-api"],
+      leaf: ["leaf@1.0.0", "", {}, "integrity-leaf"],
+    } }),
     "README.md": "documentation",
+    "tsconfig.json": '{"compilerOptions":{"strict":true}}',
   }
   try {
     for (const root of [current, next]) {
@@ -80,18 +85,42 @@ test("only context, documentation, and test changes qualify for a running-servic
       await command(["git", "init", "--quiet"], root)
       await command(["git", "add", "."], root)
     }
-    expect(await pluginOnlyUpdate(current, next, false)).toBe(false)
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    await writeFile(join(next, "tsconfig.json"), '{"compilerOptions":{"strict":false}}')
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    await writeFile(join(next, "tsconfig.json"), '{"compilerOptions":{"paths":{"gateway":["./different.ts"]}}}')
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(false)
+    await writeFile(join(next, "tsconfig.json"), files["tsconfig.json"]!)
+    await writeFile(join(next, "README.md"), "documentation-only update")
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
     await writeFile(join(next, "packages/plugins/context.ts"), "new context")
     await writeFile(join(next, "README.md"), "updated documentation")
-    expect(await pluginOnlyUpdate(current, next, false)).toBe(true)
-    expect(await pluginOnlyUpdate(current, next, true)).toBe(false)
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    expect(await canUpdateWithoutRestart(current, next, true)).toBe(false)
     for (const file of ["packages/telegram/src/gateway.ts", "packages/telegram/package.json", "install.sh", "bun.lock"]) {
       await writeFile(join(next, file), "changed")
-      expect(await pluginOnlyUpdate(current, next, false)).toBe(false)
+      expect(await canUpdateWithoutRestart(current, next, false)).toBe(false)
       await writeFile(join(next, file), files[file]!)
     }
     await rm(join(next, "packages/plugins/context.ts"))
-    expect(await pluginOnlyUpdate(current, next, false)).toBe(false)
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    await writeFile(join(next, "packages/plugins/other.js"), "new plugin")
+    await command(["git", "add", "."], next)
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    // Plugin/development dependencies can change without changing the gateway's dependency graph.
+    await writeFile(join(next, "package.json"), '{"workspaces":["packages/*"],"devDependencies":{"typescript":"new"},"scripts":{"test":"new"}}')
+    const lock = JSON.parse(files["bun.lock"]!)
+    lock.packages.plugin = ["plugin@2.0.0", "", {}, "integrity-plugin"]
+    await writeFile(join(next, "bun.lock"), JSON.stringify(lock))
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    lock.packages.leaf[0] = "leaf@1.0.1"
+    await writeFile(join(next, "bun.lock"), JSON.stringify(lock))
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(false)
+    // A new nested resolution changes the gateway even when the hoisted package is unchanged.
+    lock.packages.leaf[0] = "leaf@1.0.0"
+    lock.packages["api/leaf"] = ["leaf@2.0.0", "", {}, "different-integrity"]
+    await writeFile(join(next, "bun.lock"), JSON.stringify(lock))
+    expect(await canUpdateWithoutRestart(current, next, false)).toBe(false)
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 

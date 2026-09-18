@@ -3,7 +3,7 @@ import { mkdir, access } from "node:fs/promises"
 import { createServer } from "node:net"
 import { agentHome } from "./config"
 import manifest from "../package.json"
-import { installContextPlugin } from "./plugins"
+import { installPlugins } from "./plugins"
 
 export const upstreamVersion = manifest.dependencies["@opencode/client"]
 export const runtimeHome = () => join(agentHome(), "runtime", "home")
@@ -43,7 +43,7 @@ export async function requireRuntime() {
   try { await access(upstreamBinary()) }
   catch { throw new Error("The separate OpenCode V2 runtime is missing. Run opencode-agent setup.") }
   await configureService()
-  await installContextPlugin(runtimeEnv().XDG_CONFIG_HOME!)
+  await installPlugins(runtimeEnv().XDG_CONFIG_HOME!)
 }
 
 async function configureService() {
