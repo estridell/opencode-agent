@@ -1,22 +1,8 @@
-import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readdir, realpath, rm, stat } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { agentHome } from "./config"
-
-async function optionalText(path: string) {
-  return readFile(path, "utf8").catch(error => {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-    return undefined
-  })
-}
-
-async function replace(path: string, text: string) {
-  const temporary = `${path}.${crypto.randomUUID()}.tmp`
-  try {
-    await writeFile(temporary, text, { mode: 0o600 })
-    await rename(temporary, path)
-  } finally { await rm(temporary, { force: true }) }
-}
+import { optionalText, writeAtomic } from "./files"
 
 /** Resolve the selected application even when this module belongs to an older gateway. */
 export async function pluginSourceRoot() {
@@ -84,9 +70,9 @@ export async function installPlugins(configDirectory: string, root?: string): Pr
   if (!changes.size && !removed.length && saved) return false
   await mkdir(directory, { recursive: true, mode: 0o700 })
   // Record additions before writing them so a failed activation can restore the old set.
-  await replace(inventory, JSON.stringify([...new Set([...managed, ...desired.keys()])]))
-  for (const [name, text] of changes) await replace(join(directory, name), text)
+  await writeAtomic(inventory, JSON.stringify([...new Set([...managed, ...desired.keys()])]))
+  for (const [name, text] of changes) await writeAtomic(join(directory, name), text)
   for (const name of removed) await rm(join(directory, name), { force: true })
-  await replace(inventory, JSON.stringify([...desired.keys()]))
+  await writeAtomic(inventory, JSON.stringify([...desired.keys()]))
   return changes.size > 0 || removed.length > 0
 }

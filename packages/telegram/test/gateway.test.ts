@@ -142,18 +142,20 @@ test("image-only requests have prompt text; captions are not bot commands", asyn
   expect(prompts.map(p => p.body.text)).toEqual(["Analyze the attached image.", "/new"])
 })
 
-test("image admission retries keep their session and message IDs after ambiguous failure", async () => {
+test.each([["text", message], ["image", photo]] as const)("%s admission retries retain their session and message IDs after an ambiguous failure", async (_kind, input) => {
   const f = fixture()
   f.failNextAdmission()
-  await expect(f.gateway.handle(photo(1, "Read this screenshot."))).rejects.toThrow("Transport")
+  const update = input(1, "Work on this request.")
+  await expect(f.gateway.handle(update)).rejects.toThrow("Transport")
   const original = f.store.get<string>("active")
   await f.gateway.newSession(2)
-  await f.gateway.handle(photo(1, "Read this screenshot."))
+  await f.gateway.handle(update)
   const prompts = f.calls.filter(c => c.path.endsWith("/prompt"))
   expect(prompts).toHaveLength(2)
   expect(prompts[0]!.path).toContain(original!)
   expect(prompts[1]!.path).toBe(prompts[0]!.path)
   expect(prompts[1]!.body).toEqual(prompts[0]!.body)
+  expect(prompts[1]!.body.delivery).toBe("steer")
   expect(f.admissions.size).toBe(1)
 })
 
@@ -404,22 +406,6 @@ test("gateway startup does not require an existing owner chat", async () => {
   expect(f.calls).toHaveLength(0)
 })
 
-test("admission retries retain their session and message IDs after an ambiguous failure", async () => {
-  const f = fixture()
-  f.failNextAdmission()
-  await expect(f.gateway.handle(message(10, "Work on my task"))).rejects.toThrow()
-  const original = f.store.get("active")
-  await f.gateway.newSession(11, "Another task")
-  await f.gateway.handle(message(10, "Work on my task"))
-  const prompts = f.calls.filter(c => c.path.endsWith("/prompt"))
-  expect(prompts).toHaveLength(2)
-  expect(prompts[0]!.path).toContain(String(original))
-  expect(prompts[1]!.path).toBe(prompts[0]!.path)
-  expect(prompts[1]!.body.id).toBe(prompts[0]!.body.id)
-  expect(prompts[1]!.body.delivery).toBe("steer")
-  expect(f.admissions.size).toBe(1)
-})
-
 test("replayed /new creates one session", async () => {
   const f = fixture()
   await f.gateway.handle(message(10, "/new Planning"))
@@ -500,6 +486,7 @@ test("structured questions survive gateway reconstruction and submit a complete 
   const f = fixture()
   const id = await f.gateway.newSession(1)
   const form: FormInfo = { id: "frm_test", sessionID: id, title: "Plan", fields: [
+    { key: "source", type: "string", hidden: true, default: "telegram" },
     { key: "mode", type: "string", required: true, options: [{ label: "Build", value: "build" }, { label: "Review", value: "review" }] },
     { key: "count", type: "integer", required: true, minimum: 1, when: [{ key: "mode", op: "eq", value: "build" }] },
   ] }
@@ -507,8 +494,12 @@ test("structured questions survive gateway reconstruction and submit a complete 
   await f.gateway.reconcile()
   await f.gateway.forms.act({ kind: "form-value", sessionID: id, id: form.id, field: "mode", value: "build" })
   const restored = new Gateway(f.gateway.config, f.store, f.gateway.client, f.gateway.api, 0)
-  await restored.forms.act({ kind: "form-value", sessionID: id, id: form.id, field: "count" }, "3")
-  expect(f.calls.find(c => c.path.endsWith("/form/frm_test/reply"))!.body).toEqual({ answer: { mode: "build", count: 3 } })
+  const answering = restored.forms.act({ kind: "form-value", sessionID: id, id: form.id, field: "count" }, "3")
+  const reconciling = restored.forms.reconcile(id)
+  await answering
+  expect(await reconciling).toEqual([])
+  expect(f.calls.filter(c => c.path.endsWith("/form"))).toHaveLength(2)
+  expect(f.calls.find(c => c.path.endsWith("/form/frm_test/reply"))!.body).toEqual({ answer: { source: "telegram", mode: "build", count: 3 } })
 })
 
 test("question parsing respects closed choices, numeric bounds, and conditional visibility", () => {

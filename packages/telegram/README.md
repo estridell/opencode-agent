@@ -10,10 +10,13 @@ It also supplies terminal commands and setup.
 | `src/prompts.ts` | Plain terminal prompts and hidden token input |
 | `src/service.ts` | Linux user-service installation |
 | `src/runtime.ts` | Separate upstream V2 installation and environment |
+| `src/update.ts` | Application updates, restart decisions, and recovery |
+| `src/plugins.ts` | Bundled plugin installation and removal |
+| `src/files.ts` | Optional file reads and atomic file replacement |
 | `src/opencode.ts` | Official client connection |
 | `src/gateway.ts` | Telegram commands, sessions, events, and state checks |
 | `src/forms.ts` | OpenCode questions and answers |
-| `src/pickers.ts` | Single-message pickers and checks for expired buttons |
+| `src/pickers.ts` | Picker pages, single-message updates, and checks for expired buttons |
 | `src/images.ts` | Telegram image downloads and OpenCode attachments |
 | `src/telegram.ts` | Telegram message delivery and rate control |
 | `src/format.ts` | Telegram text formatting |

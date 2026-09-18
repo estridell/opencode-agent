@@ -55,11 +55,8 @@ export class Forms {
     for (const f of form.fields) if (f.type !== "external" && f.hidden && f.default !== undefined) p.answer[f.key] = f.default
     const field = form.fields.find(f => visible(f, p.answer) && !(f.key in p.answer) && !p.skipped.includes(f.key))
     if (!field) {
-      // Hidden fields may carry defaults; upstream validates the final answer.
-      const answer = { ...p.answer }
-      for (const f of form.fields) if (f.type !== "external" && f.hidden && f.default !== undefined) answer[f.key] = f.default
       try {
-        await this.client().session.form.reply({ sessionID: form.sessionID, formID: form.id, answer })
+        await this.client().session.form.reply({ sessionID: form.sessionID, formID: form.id, answer: p.answer })
         await this.settled(form.id, "Answered.")
       } catch (error) {
         if (isNotFound(error) || (error as { _tag?: string })._tag === "FormAlreadySettledError") return this.settled(form.id, "Resolved in OpenCode.")
@@ -122,7 +119,7 @@ export class Forms {
       if (!field.options.some(o => o.value === value)) throw new Error("Unknown choice.")
       const next = selected.includes(value) ? selected.filter(v => v !== value) : [...selected, value]
       this.store.set(`selected:${form.id}:${field.key}`, next)
-      // Keep the original keyboard and show selections in the callback toast via the caller.
+      // Keep the original keyboard. The caller sends the selected values in a quiet message.
       return `Selected: ${next.map(v => field.options.find(o => o.value === v)?.label ?? v).join(", ") || "none"}`
     }
     if (action.kind === "form-skip") {
@@ -151,15 +148,15 @@ export class Forms {
     this.store.delete(`form:${id}`)
   }
 
-  async reconcile(sessionID: string, forms: FormInfo[]) {
+  async reconcile(sessionID: string) {
     return this.exclusive(async () => {
-      // Re-read pending forms inside the interaction lock: a callback may have resolved one
-      // after the gateway took its snapshot but before this reconciliation acquired the lock.
-      forms = await this.client().session.form.list({ sessionID })
+      // Read pending forms inside the interaction lock. An earlier callback can resolve a form.
+      const forms = await this.client().session.form.list({ sessionID })
       const pending = forms.map(f => f.id)
       for (const id of this.store.get<string[]>(`forms:${sessionID}`) ?? []) if (!pending.includes(id)) await this.settled(id)
       for (const form of forms) await this.present(form)
       this.store.set(`forms:${sessionID}`, pending)
+      return forms
     })
   }
 }

@@ -39,7 +39,6 @@ export class Gateway {
   readonly pickers: Pickers
   readonly images: Images
   requestUpdate = startUpdate
-  private mutex: Promise<unknown> = Promise.resolve()
   private dirty = true
   private known = new Set<string>()
   constructor(readonly config: Config, readonly store: Store, public client: Client, readonly api = new Api(config.token), spacing = 1050) {
@@ -48,12 +47,6 @@ export class Gateway {
     this.pickers = new Pickers(store, this.telegram)
     this.images = new Images(api, config.token)
     for (const s of store.sessions()) this.known.add(s.id)
-  }
-
-  exclusive<T>(work: () => Promise<T>): Promise<T> {
-    const next = this.mutex.then(work)
-    this.mutex = next.catch(() => {})
-    return next
   }
 
   async initialize() {
@@ -118,11 +111,9 @@ export class Gateway {
       return
     }
     const message = update.message!
+    const respond = (text: string) => this.telegram.send(text, undefined, `update:${update.update_id}`)
     const hasImage = !!message.photo?.length || !!message.document
-    if (!message.text && !hasImage) {
-      await this.telegram.send("Send text or a PNG, JPEG, GIF, or WebP image.", undefined, `update:${update.update_id}`)
-      return
-    }
+    if (!message.text && !hasImage) return respond("Send text or a PNG, JPEG, GIF, or WebP image.")
     const text = message.text ?? message.caption ?? "Analyze the attached image."
     const command = message.text && /^\/(\w+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(message.text)
     if (command) {
@@ -131,24 +122,23 @@ export class Gateway {
       if (name === "update") {
         const key = `update-job:${update.update_id}`
         if (this.store.get(key)) return
-        const id = await this.telegram.send("Starting update.", undefined, `update:${update.update_id}`)
+        const id = await respond("Starting update.")
         try { this.store.set(key, await this.requestUpdate(id)) }
         catch (error) { await this.telegram.edit(id, errorText(error, [this.config.token])) }
         return
       }
-      if (name === "start" || name === "help") { await this.telegram.send(help, undefined, `update:${update.update_id}`); return }
+      if (name === "start" || name === "help") return respond(help)
       if (name === "new") {
         await this.newSession(update.update_id, arg)
-        await this.telegram.send("New session.", undefined, `update:${update.update_id}`)
-        return
+        return respond("New session.")
       }
       const sessionID = await this.active(update.update_id)
-      if (name === "sessions") { await this.sessionMenu(0); return }
-      if (name === "model") { await this.modelMenu(sessionID, arg, 0); return }
-      if (name === "agent") { await this.agentMenu(sessionID); return }
+      if (name === "sessions") return this.sessionMenu(0)
+      if (name === "model") return this.modelMenu(sessionID, arg, 0)
+      if (name === "agent") return this.agentMenu(sessionID)
       if (name === "stop") {
         await this.client.session.interrupt({ sessionID, resume: false })
-        await this.telegram.send("Interrupted the active session.", undefined, `update:${update.update_id}`)
+        await respond("Interrupted the active session.")
         this.dirty = true
         return
       }
@@ -156,17 +146,12 @@ export class Gateway {
         const session = await this.client.session.get({ sessionID })
         const active = await this.client.session.active()
         const model = session.model ?? (await this.client.model.default({ location: session.location })).data
-        await this.telegram.send(`${active[sessionID] ? "Working" : "Idle"}\nModel: ${model ? modelLabel(model) : "Unavailable"}\nAgent: ${session.agent ?? "OpenCode default"}\nDirectory: ${session.location.directory}`, undefined, `update:${update.update_id}`)
-        return
+        return respond(`${active[sessionID] ? "Working" : "Idle"}\nModel: ${model ? modelLabel(model) : "Unavailable"}\nAgent: ${session.agent ?? "OpenCode default"}\nDirectory: ${session.location.directory}`)
       }
-      await this.telegram.send("Unknown command. Use /help.", undefined, `update:${update.update_id}`)
-      return
+      return respond("Unknown command. Use /help.")
     }
     const reply = message.reply_to_message && this.store.get<Action>(`form-reply:${message.reply_to_message.message_id}`)
-    if (reply && hasImage) {
-      await this.telegram.send("Reply with text to answer this question. Send the image as a separate message.", undefined, `update:${update.update_id}`)
-      return
-    }
+    if (reply && hasImage) return respond("Reply with text to answer this question. Send the image as a separate message.")
     if (reply) { await this.forms.act({ ...reply, kind: "form-value" }, text); this.dirty = true; return }
     // Remember routing before admission, so a redelivered Telegram update cannot target a newly selected session.
     const route = `input:${update.update_id}`
@@ -188,44 +173,23 @@ export class Gateway {
 
   async sessionMenu(page: number, pickerID?: string) {
     const sessions = this.store.sessions().filter(s => !s.parentID && !s.missing)
-    const pages = Math.max(1, Math.ceil(sessions.length / 8))
-    page = Math.max(0, Math.min(page, pages - 1))
-    const rows: Choice[][] = sessions.slice(page * 8, page * 8 + 8).map(s => [this.choice(`${this.store.get("active") === s.id ? "✓ " : ""}${s.title}`, { kind: "session", sessionID: s.id })])
     const active = this.store.get<string>("active")!
-    const nav = []
-    if (page) nav.push(this.choice("Previous", { kind: "sessions", sessionID: active, page: page - 1 }))
-    if (page + 1 < pages) nav.push(this.choice("Next", { kind: "sessions", sessionID: active, page: page + 1 }))
-    if (nav.length) rows.push(nav)
-    rows.push([this.choice("Cancel", { kind: "cancel", sessionID: active })])
-    await this.pickers.show(`Sessions · ${page + 1}/${pages}`, rows, pickerID)
+    const choices = sessions.map(s => this.choice(`${active === s.id ? "✓ " : ""}${s.title}`, { kind: "session", sessionID: s.id }))
+    await this.pickers.page("Sessions", choices, { kind: "sessions", sessionID: active, page }, pickerID)
   }
 
   async modelMenu(sessionID: string, search: string, page: number, pickerID?: string) {
     const session = await this.client.session.get({ sessionID })
     const models = (await this.client.model.list({ location: session.location })).data.filter(m => m.enabled && `${m.name} ${m.providerID}/${m.id}`.toLowerCase().includes(search.toLowerCase()))
-    const pages = Math.max(1, Math.ceil(models.length / 8))
-    page = Math.max(0, Math.min(page, pages - 1))
-    const rows: Choice[][] = models.slice(page * 8, page * 8 + 8).map(m => [this.choice(`${m.providerID}/${m.id}`, { kind: "model", sessionID, value: JSON.stringify({ providerID: m.providerID, id: m.id }), search, page })])
-    const nav = []
-    if (page) nav.push(this.choice("Previous", { kind: "models", sessionID, search, page: page - 1 }))
-    if (page + 1 < pages) nav.push(this.choice("Next", { kind: "models", sessionID, search, page: page + 1 }))
-    if (nav.length) rows.push(nav)
-    rows.push([this.choice("Cancel", { kind: "cancel", sessionID })])
-    await this.pickers.show(models.length ? `Models · ${page + 1}/${pages}` : "No models found. Use /model <search> to try again.", rows, pickerID)
+    const choices = models.map(m => this.choice(`${m.providerID}/${m.id}`, { kind: "model", sessionID, value: JSON.stringify({ providerID: m.providerID, id: m.id }), search }))
+    await this.pickers.page("Models", choices, { kind: "models", sessionID, search, page }, pickerID, "No models found. Use /model <search> to try again.")
   }
 
   async agentMenu(sessionID: string, page = 0, pickerID?: string) {
     const session = await this.client.session.get({ sessionID })
     const agents = (await this.client.agent.list({ location: session.location })).data.filter(a => !a.hidden && a.mode !== "subagent")
-    const pages = Math.max(1, Math.ceil(agents.length / 8))
-    page = Math.max(0, Math.min(page, pages - 1))
-    const rows: Choice[][] = agents.slice(page * 8, page * 8 + 8).map(a => [this.choice(a.name, { kind: "agent", sessionID, value: a.id, page })])
-    const nav = []
-    if (page) nav.push(this.choice("Previous", { kind: "agents", sessionID, page: page - 1 }))
-    if (page + 1 < pages) nav.push(this.choice("Next", { kind: "agents", sessionID, page: page + 1 }))
-    if (nav.length) rows.push(nav)
-    rows.push([this.choice("Cancel", { kind: "cancel", sessionID })])
-    await this.pickers.show(`Agents · ${page + 1}/${pages}`, rows, pickerID)
+    const choices = agents.map(a => this.choice(a.name, { kind: "agent", sessionID, value: a.id }))
+    await this.pickers.page("Agents", choices, { kind: "agents", sessionID, page }, pickerID)
   }
 
   private async defaultMenu(action: Action, label: string, kind: "model" | "agent") {
@@ -362,10 +326,7 @@ export class Gateway {
       try {
         const session = await this.client.session.get({ sessionID: tracked.id })
         this.track(session)
-        const [permissions, forms] = await Promise.all([
-          this.client.permission.list({ sessionID: session.id }),
-          this.client.session.form.list({ sessionID: session.id }),
-        ])
+        const permissions = await this.client.permission.list({ sessionID: session.id })
         for (const old of this.store.get<string[]>(`permissions:${session.id}`) ?? []) {
           if (permissions.some(p => p.id === old)) continue
           const id = this.store.get<number>(`permission:${old}`)
@@ -389,7 +350,7 @@ export class Gateway {
           this.store.set(`permission:${p.id}`, id)
         }
         this.store.set(`permissions:${session.id}`, permissions.map(p => p.id))
-        await this.forms.reconcile(session.id, forms)
+        const forms = await this.forms.reconcile(session.id)
         if (tracked.parentID) continue
         await this.messages({ ...tracked, title: session.title ?? tracked.title })
         if (!running[session.id] && session.outcome === "failed") {
@@ -440,16 +401,14 @@ export class Gateway {
           if (!ready) { await onReady?.(); ready = true }
           for (const update of updates) {
             if (signal.aborted) break
-            await this.exclusive(async () => {
-              try { await this.handle(update) }
-              catch (error) {
-                log(error)
-                // Transport failures remain unacknowledged; retry admission with the same message ID.
-                if (error instanceof Error && !(error instanceof GrammyError) && /Transport|fetch|connect|timeout/i.test(`${error.name} ${error.message}`)) throw error
-                if (authorized(update, this.config.ownerID)) await this.telegram.send(`Cannot complete that request: ${errorText(error, [this.config.token])}`, undefined, `update-error:${update.update_id}`)
-              }
-              this.store.set("offset", update.update_id + 1)
-            })
+            try { await this.handle(update) }
+            catch (error) {
+              log(error)
+              // Transport failures remain unacknowledged; retry admission with the same message ID.
+              if (error instanceof Error && !(error instanceof GrammyError) && /Transport|fetch|connect|timeout/i.test(`${error.name} ${error.message}`)) throw error
+              if (authorized(update, this.config.ownerID)) await this.telegram.send(`Cannot complete that request: ${errorText(error, [this.config.token])}`, undefined, `update-error:${update.update_id}`)
+            }
+            this.store.set("offset", update.update_id + 1)
           }
         } catch (error) {
           if (!signal.aborted) log(error)

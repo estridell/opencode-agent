@@ -103,9 +103,12 @@ The gateway stores connection data in SQLite:
 
 OpenCode stores session history and execution state.
 
+Plugin installation and update state use `files.ts` to replace files through a private temporary file in the same directory.
+
 ## Pickers and defaults
 
 The model, agent, and session pickers use one Telegram message for all pages.
+`pickers.ts` controls page limits and navigation for all three pickers.
 Model variants and the default question use that same message.
 When selection finishes, a short result replaces the message and its buttons.
 Buttons from previous pages or completed pickers cannot change a selection.
@@ -198,6 +201,8 @@ It supports these field functions:
 - Default values and optional answers.
 - Conditional fields.
 - Cancellation and external links.
+
+Form reconciliation reads pending forms once, inside the same lock that protects answers.
 
 Text answers must reply to the applicable question message.
 Other messages remain available for instructions to the current task.
