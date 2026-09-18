@@ -14,6 +14,7 @@ It also supplies terminal commands and setup.
 | `src/gateway.ts` | Telegram commands, sessions, events, and state checks |
 | `src/forms.ts` | OpenCode questions and answers |
 | `src/pickers.ts` | Single-message pickers and checks for expired buttons |
+| `src/images.ts` | Telegram image downloads and OpenCode attachments |
 | `src/telegram.ts` | Telegram message delivery and rate control |
 | `src/format.ts` | Telegram text formatting |
 | `src/store.ts` | SQLite storage for gateway data |

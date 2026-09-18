@@ -9,6 +9,21 @@ import { runtimeEnv, registrationFile } from "../src/runtime"
 import { parseAnswer, visible } from "../src/forms"
 import { systemdQuote } from "../src/service"
 import { parseConfig } from "../src/config"
+import { imageLimit, imageType } from "../src/images"
+
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGNwONBAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAC3PAFuD+GVmAAAAAElFTkSuQmCC", "base64")
+
+function photo(id: number, caption?: string, from = 42): Update {
+  const update = message(id, "", from)
+  delete update.message!.text
+  update.message!.caption = caption
+  update.message!.photo = [
+    { file_id: "small", file_unique_id: "s", width: 32, height: 32 },
+    { file_id: "large", file_unique_id: "l", width: 1024, height: 768 },
+    { file_id: "medium", file_unique_id: "m", width: 64, height: 64 },
+  ]
+  return update
+}
 
 const stores: Store[] = []
 afterEach(() => { for (const store of stores.splice(0)) store.close() })
@@ -95,13 +110,113 @@ function fixture() {
       return { ok: false, error_code: 400, description: "Bad Request: chat not found" }
     }
     const result = method === "getMe" ? { id: 999, is_bot: true, first_name: "Agent", username: "fixturebot" }
+      : method === "getFile" ? { file_id: "image", file_unique_id: "image", file_path: "photos/image.png" }
       : method === "getWebhookInfo" ? { url: "", pending_update_count: 0 }
       : method === "sendMessage" ? { message_id: telegram.length, date: 0, chat: { id: 42, type: "private" }, text: "" } : true
     return { ok: true, result } as never
   })
   const gateway = new Gateway({ token: "999:fake", ownerID: 42, directory: "/agent/workspace" }, store, client, api, 0)
+  gateway.images.fetchFile = Object.assign(async () => new Response(png), { preconnect: fetch.preconnect })
   return { gateway, store, calls, telegram, sessions, messages, forms, permissions, admissions, running, models, failNextAdmission: () => { failAdmission = true } }
 }
+
+test("photos use the largest size and submit caption and bytes without Telegram credentials", async () => {
+  const f = fixture()
+  await f.gateway.handle(photo(1, "What is in this picture?"))
+  expect(f.telegram.find(t => t.method === "getFile")!.payload.file_id).toBe("large")
+  const prompt = f.calls.find(c => c.path.endsWith("/prompt"))!
+  expect(prompt.body.text).toBe("What is in this picture?")
+  expect(prompt.body.files).toEqual([{ uri: `data:image/png;base64,${png.toString("base64")}`, name: "photo-1.png" }])
+  expect(prompt.body.delivery).toBe("steer")
+  expect(JSON.stringify(prompt.body)).not.toContain("999:fake")
+  expect(f.telegram.filter(t => t.method === "sendMessage")).toHaveLength(0)
+})
+
+test("image-only requests have prompt text; captions are not bot commands", async () => {
+  const f = fixture()
+  await f.gateway.handle(photo(1))
+  const id = f.store.get<string>("active")
+  await f.gateway.handle(photo(2, "/new"))
+  expect(f.store.get<string>("active")).toBe(id)
+  const prompts = f.calls.filter(c => c.path.endsWith("/prompt"))
+  expect(prompts.map(p => p.body.text)).toEqual(["Analyze the attached image.", "/new"])
+})
+
+test("image admission retries keep their session and message IDs after ambiguous failure", async () => {
+  const f = fixture()
+  f.failNextAdmission()
+  await expect(f.gateway.handle(photo(1, "Read this screenshot."))).rejects.toThrow("Transport")
+  const original = f.store.get<string>("active")
+  await f.gateway.newSession(2)
+  await f.gateway.handle(photo(1, "Read this screenshot."))
+  const prompts = f.calls.filter(c => c.path.endsWith("/prompt"))
+  expect(prompts).toHaveLength(2)
+  expect(prompts[0]!.path).toContain(original!)
+  expect(prompts[1]!.path).toBe(prompts[0]!.path)
+  expect(prompts[1]!.body).toEqual(prompts[0]!.body)
+  expect(f.admissions.size).toBe(1)
+})
+
+test("image documents use byte detection and a display filename", async () => {
+  const f = fixture()
+  const update = message(1, "")
+  delete update.message!.text
+  update.message!.document = { file_id: "doc", file_unique_id: "doc", file_name: "../../screenshot.png", mime_type: "application/octet-stream" }
+  await f.gateway.handle(update)
+  expect(f.calls.find(c => c.path.endsWith("/prompt"))!.body.files).toEqual([{ uri: `data:image/png;base64,${png.toString("base64")}`, name: "screenshot.png" }])
+  f.gateway.images.fetchFile = Object.assign(async () => new Response("%PDF-1.0"), { preconnect: fetch.preconnect })
+  await expect(f.gateway.handle(update)).rejects.toThrow("Unsupported image format")
+  expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(1)
+})
+
+test("oversized images are rejected before download and while reading an undeclared stream", async () => {
+  const f = fixture()
+  const update = photo(1)
+  update.message!.photo![1]!.file_size = imageLimit + 1
+  await expect(f.gateway.handle(update)).rejects.toThrow("too large")
+  expect(f.telegram.filter(t => t.method === "getFile")).toHaveLength(0)
+  delete update.message!.photo![1]!.file_size
+  let cancelled = false
+  f.gateway.images.fetchFile = Object.assign(async () => new Response(new ReadableStream({
+    pull(controller) { controller.enqueue(new Uint8Array(imageLimit + 1)) },
+    cancel() { cancelled = true },
+  })), { preconnect: fetch.preconnect })
+  await expect(f.gateway.handle(update)).rejects.toThrow("too large")
+  expect(cancelled).toBe(true)
+  expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(0)
+})
+
+test("image download failures can retry and never expose the token", async () => {
+  const f = fixture()
+  f.gateway.images.fetchFile = Object.assign(async () => { throw new Error("https://api.telegram.org/file/bot999:fake/image") }, { preconnect: fetch.preconnect })
+  await expect(f.gateway.handle(photo(1))).rejects.toThrow("Image download connection failed")
+  expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(0)
+  f.gateway.images.fetchFile = Object.assign(async () => new Response(png), { preconnect: fetch.preconnect })
+  await f.gateway.handle(photo(1))
+  expect(f.calls.filter(c => c.path.endsWith("/prompt"))).toHaveLength(1)
+})
+
+test("unauthorized images are not downloaded; form image replies do not submit captions as answers", async () => {
+  const f = fixture()
+  await f.gateway.handle(photo(1, undefined, 77))
+  expect(f.telegram).toHaveLength(0)
+  expect(f.calls).toHaveLength(0)
+  f.store.set("form-reply:50", { kind: "form-value", sessionID: "ses", id: "frm", field: "answer" })
+  const update = photo(2, "a caption")
+  update.message!.reply_to_message = { ...message(50, "Question").message!, reply_to_message: undefined }
+  await f.gateway.handle(update)
+  expect(f.telegram.filter(t => t.method === "getFile")).toHaveLength(0)
+  expect(f.calls).toHaveLength(0)
+  expect(picker(f).text).toContain("Reply with text")
+})
+
+test("supported image signatures identify PNG, JPEG, GIF, and WebP", () => {
+  expect(imageType(png)).toBe("image/png")
+  expect(imageType(Buffer.from([255, 216, 255, 224]))).toBe("image/jpeg")
+  expect(imageType(Buffer.from("GIF89a"))).toBe("image/gif")
+  expect(imageType(Buffer.from("RIFF1234WEBP"))).toBe("image/webp")
+  expect(imageType(Buffer.from("<svg></svg>"))).toBeUndefined()
+})
 
 function picker(f: ReturnType<typeof fixture>) {
   const index = f.telegram.findLastIndex(t => t.method === "sendMessage" || t.method === "editMessageText")

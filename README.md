@@ -19,7 +19,7 @@ OpenCode provides the agent runtime. This project does not maintain a separate v
 The first version supports one owner on a Linux machine or virtual machine (VM).
 
 - A separate OpenCode V2 installation, service, configuration, credentials, and session database.
-- Text messages in a private Telegram chat.
+- Text messages, photos, and image files in a private Telegram chat.
 - New messages that change the instructions for a task in progress.
 - Saved sessions with commands to create, select, and stop them.
 - Agent responses with a temporary Telegram typing indicator during work.
@@ -76,6 +76,13 @@ To answer an agent question, reply to that question message or use its buttons.
 Other messages give new instructions to the current task.
 When you select a different session, work in the previous session continues.
 Responses from other sessions include the session title.
+
+Send a photo or image file to ask about its contents.
+Add your question as the caption. Without a caption, the agent receives a request to analyze the image.
+Supported formats are PNG, JPEG, GIF, and WebP, up to 20 MiB per image.
+Select a model with image input through `/model`.
+Images use the current session and can add information to a task in progress.
+Telegram albums send each image as a separate request.
 
 The model, agent, and session pickers update the same message when you change pages.
 The final selection replaces the picker and removes its buttons.

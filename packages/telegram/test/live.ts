@@ -37,6 +37,13 @@ try {
   assert.equal((await client.session.inbox.list({ sessionID })).length, 1)
   await client.session.inbox.cancel({ sessionID, inboxID: first.id })
 
+  const image = { uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGNwONBAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAC3PAFuD+GVmAAAAAElFTkSuQmCC", name: "pixel.png" }
+  const attached = await client.session.prompt({ sessionID, id: `msg_image_${Date.now()}`, text: "Image admission test", files: [image], delivery: "steer", resume: false })
+  assert.equal(attached.payload.files?.[0]?.name, "pixel.png")
+  assert.equal(attached.payload.files?.[0]?.mime, "image/png")
+  assert.ok(attached.payload.files?.[0]?.data)
+  await client.session.inbox.cancel({ sessionID, inboxID: attached.id })
+
   const form = await client.session.form.create({ sessionID, title: "Choose", fields: [{ key: "choice", type: "string", required: true, options: [{ label: "Yes", value: "yes" }] }] })
   assert.equal((await client.session.form.list({ sessionID }))[0]?.id, form.id)
   await client.session.form.reply({ sessionID, formID: form.id, answer: { choice: "yes" } })
@@ -57,7 +64,7 @@ try {
   await client.session.interrupt({ sessionID, resume: false })
   await client.message.list({ sessionID, type: "assistant", order: "desc" })
   await waitFor(() => events.includes("permission.replied") && events.includes("form.replied"))
-  console.log(`Live OpenCode ${(await client.server.info()).version}: session creation, idempotent admission, forms, permissions, interrupt, message history, and events passed.`)
+  console.log(`Live OpenCode ${(await client.server.info()).version}: session creation, idempotent admission, image attachment, forms, permissions, interrupt, message history, and events passed.`)
 } finally {
   controller.abort()
   await watching.catch(() => {})

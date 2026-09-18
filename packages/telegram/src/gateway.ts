@@ -10,6 +10,7 @@ import { Telegram } from "./telegram"
 import { Forms } from "./forms"
 import { Pickers, type Choice } from "./pickers"
 import { startUpdate } from "./update"
+import { Images } from "./images"
 
 type Defaults = { model?: ModelRef; agent?: string }
 const modelLabel = (model: ModelRef) => `${model.providerID}/${model.id}${model.variant ? ` (${model.variant})` : ""}`
@@ -24,7 +25,7 @@ export const commands = [
   { command: "update", description: "Update the application and OpenCode" },
   { command: "help", description: "Show commands and usage" },
 ]
-const help = `**OpenCode Agent**\nSend a text request. New messages give instructions to the task in progress.\n\n/new [title] - create a session\n/sessions - select a previous bot session\n/stop - stop work in the selected session\n/status - show the session, model, and directory\n/model [search] - select a model and variant\n/agent - select an agent\n/update - update the application and OpenCode\n/help - show this message\n\nTo answer a question, reply to its message. Permission buttons send decisions to OpenCode.\n\nThis is an unofficial community project. It is not affiliated with the OpenCode team.`
+const help = `**OpenCode Agent**\nSend text or an image. Add a caption to ask about the image. New messages give instructions to the task in progress.\n\n/new [title] - create a session\n/sessions - select a previous bot session\n/stop - stop work in the selected session\n/status - show the session, model, and directory\n/model [search] - select a model and variant\n/agent - select an agent\n/update - update the application and OpenCode\n/help - show this message\n\nImages: PNG, JPEG, GIF, or WebP, up to 20 MiB each. Use a model with image input.\nTo answer a question, reply with text or use its buttons.\n\nThis is an unofficial community project. It is not affiliated with the OpenCode team.`
 
 export function authorized(update: Update, ownerID: number): boolean {
   const message = update.message ?? update.callback_query?.message
@@ -36,6 +37,7 @@ export class Gateway {
   readonly telegram: Telegram
   readonly forms: Forms
   readonly pickers: Pickers
+  readonly images: Images
   requestUpdate = startUpdate
   private mutex: Promise<unknown> = Promise.resolve()
   private dirty = true
@@ -44,6 +46,7 @@ export class Gateway {
     this.telegram = new Telegram(api, config.ownerID, store, spacing)
     this.forms = new Forms(() => this.client, store, this.telegram)
     this.pickers = new Pickers(store, this.telegram)
+    this.images = new Images(api, config.token)
     for (const s of store.sessions()) this.known.add(s.id)
   }
 
@@ -115,12 +118,13 @@ export class Gateway {
       return
     }
     const message = update.message!
-    if (!message.text) {
-      await this.telegram.send("This version accepts text messages. Send your request as text.", undefined, `update:${update.update_id}`)
+    const hasImage = !!message.photo?.length || !!message.document
+    if (!message.text && !hasImage) {
+      await this.telegram.send("Send text or a PNG, JPEG, GIF, or WebP image.", undefined, `update:${update.update_id}`)
       return
     }
-    const text = message.text
-    const command = /^\/(\w+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(text)
+    const text = message.text ?? message.caption ?? "Analyze the attached image."
+    const command = message.text && /^\/(\w+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(message.text)
     if (command) {
       const name = command[1]!.toLowerCase()
       const arg = command[2]?.trim() ?? ""
@@ -159,15 +163,20 @@ export class Gateway {
       return
     }
     const reply = message.reply_to_message && this.store.get<Action>(`form-reply:${message.reply_to_message.message_id}`)
+    if (reply && hasImage) {
+      await this.telegram.send("Reply with text to answer this question. Send the image as a separate message.", undefined, `update:${update.update_id}`)
+      return
+    }
     if (reply) { await this.forms.act({ ...reply, kind: "form-value" }, text); this.dirty = true; return }
     // Remember routing before admission, so a redelivered Telegram update cannot target a newly selected session.
     const route = `input:${update.update_id}`
     const sessionID = this.store.get<string>(route) ?? await this.active(update.update_id)
     this.store.set(route, sessionID)
+    const files = hasImage ? [await this.images.attachment(message)] : undefined
     await this.client.session.prompt({
       sessionID,
       id: `msg_tg_${this.store.get<string>("binding")!.replaceAll(":", "_")}_${message.message_id}`,
-      text, delivery: "steer", metadata: { transport: "telegram", updateID: update.update_id },
+      text, ...(files ? { files } : {}), delivery: "steer", metadata: { transport: "telegram", updateID: update.update_id },
     })
     void this.telegram.typing()
     this.dirty = true

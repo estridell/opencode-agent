@@ -115,6 +115,29 @@ A connection failure can occur after Telegram accepts a response but before the 
 A retry can then send the response again.
 Stable OpenCode input IDs prevent this delivery problem from repeating the agent task.
 
+## Image input
+
+The gateway accepts Telegram photos and image documents.
+For photos, it selects the size with the largest pixel area.
+It downloads the file through Telegram `getFile` and checks the byte signature.
+Accepted formats are PNG, JPEG, GIF, and WebP.
+The download checks declared sizes and limits streamed content to 20 MiB.
+
+The gateway submits image bytes as a `data:` URI in the upstream prompt's `files` field.
+The Telegram download URL contains the bot token and never enters the OpenCode prompt.
+OpenCode decodes the image and applies its own media processing and model limits.
+The gateway does not add tools or dependencies for image input.
+
+The caption becomes the request text.
+Without a caption, the request text is `Analyze the attached image.`
+Captions do not execute bot commands.
+Image replies to structured questions require a separate image message; question answers remain text or button selections.
+
+Images use the same saved session route and stable message ID as text input.
+Download connection failures and ambiguous admission failures can retry without a second model execution.
+The gateway keeps downloads in memory; OpenCode stores admitted attachments with session data.
+Each image in a Telegram album becomes a separate request.
+
 ## Permissions and questions
 
 Before it sends a permission decision, the gateway checks that the request is still pending.
@@ -196,7 +219,7 @@ The live test checks the API with a real, separate V2 service.
 
 ## Current limits
 
-- Telegram input supports text only.
+- Input supports text and images. Audio, video, PDF, and other document formats are not supported.
 - Text formatting supports bold text, inline code, and code blocks. Other Markdown stays as text.
 - There are no additional memory, scheduling, or personal-agent plugins.
 - Session selection shows sessions from this bot only.

@@ -9,6 +9,7 @@
     "test:live": "bun run packages/telegram/test/live.ts",
     "test:runtime-update": "bun run packages/telegram/test/runtime-update-live.ts",
     "test:telegram": "bun run packages/telegram/test/telegram-live.ts",
+    "test:images": "bun run packages/telegram/test/images-live.ts",
     "setup": "bun run packages/telegram/src/main.ts setup",
     "service:install": "bun run packages/telegram/src/main.ts gateway install"
   },

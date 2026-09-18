@@ -289,10 +289,30 @@ Restart the gateway after this change.
 26. Restart the gateway.
 27. Request an action that requires permission under an `ask` rule.
 28. Check that the action continues without a permission message.
+29. Send a photo with a question in its caption.
+30. Check that the answer uses the image contents.
+31. Send a PNG image as a file without a caption.
+32. Check that the agent analyzes the image in the current session.
 
 Automated tests use a simulated Telegram API.
 The live API test uses a real temporary V2 service without a model provider call.
 This acceptance test checks the complete connection with a real bot and provider.
+
+To test real Telegram photo and image-file downloads, run:
+
+```sh
+OPENCODE_AGENT_TEST_TELEGRAM=1 bun run test:images
+```
+
+The test uploads two images and checks their admission into temporary OpenCode sessions.
+It deletes its Telegram messages and sessions when it finishes.
+Add `OPENCODE_AGENT_TEST_MODEL=1` to check image recognition with one model request:
+
+```sh
+OPENCODE_AGENT_TEST_TELEGRAM=1 OPENCODE_AGENT_TEST_MODEL=1 bun run test:images
+```
+
+This option uses the configured provider and can incur model charges.
 
 To test picker message edits with the configured bot, run:
 
