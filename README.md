@@ -123,11 +123,12 @@ The update worker runs separately from the gateway.
 It continues if the gateway stops or you close the terminal.
 
 The updater prepares and checks a new application directory before activation.
+Updates keep services running by default. Only explicit restart conditions stop a service.
 Plugin additions, changes, renames, and removals keep Telegram and OpenCode running.
 OpenCode automatically reloads the installed plugin set.
 Documentation, tests, and development-only changes also keep both services running.
 Plugin dependency changes require a gateway restart only when they also change the gateway's resolved dependencies.
-Gateway code, gateway dependencies, and installer changes restart the gateway.
+Gateway code, gateway dependencies, execution settings, and installer changes restart the gateway.
 Runtime version changes restart both services.
 A runtime restart can interrupt active tasks.
 An unchanged installation does not restart.

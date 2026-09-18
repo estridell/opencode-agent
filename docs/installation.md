@@ -216,11 +216,12 @@ Uncommitted changes in a development checkout do not enter the update.
 
 The worker restarts OpenCode when the runtime version changes.
 This restart can interrupt active tasks.
+All other updates keep services running unless an explicit gateway restart condition applies.
 Plugin additions, changes, renames, and removals keep Telegram and OpenCode running.
 OpenCode's file watcher automatically loads, reloads, and unloads these plugins.
 Documentation, tests, and development-only changes also keep services running.
 Plugin-only dependency changes keep services running when the gateway's resolved dependencies remain the same.
-Changes to gateway code, gateway dependencies, or the installer restart the Telegram gateway.
+Changes to gateway code, gateway dependencies, execution settings, or the installer restart the Telegram gateway.
 An unchanged installation reports that it is up to date without a restart.
 
 Updates require the systemd user service.

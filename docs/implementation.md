@@ -220,19 +220,31 @@ It installs dependencies and runs type checks and tests before activation.
 Repository dependency versions otherwise follow the committed lockfile.
 The installer selects the Bun version and regenerates the launcher.
 
-The worker compares tracked file contents and file modes in the current and prepared application directories.
-All bundled plugin additions, changes, renames, and removals can use the no-restart path.
-Documentation-only, test-only, example configuration, and development tooling changes can also use that path.
-Gateway source, installer, and other unclassified code changes use the normal gateway restart path.
-A runtime version change always uses the restart path.
+The default update path keeps both services running.
+`applyUpdate` uses its standard activation, verification, and recovery steps unless an explicit restart condition applies.
+The restart steps are optional and separate from these standard steps.
+
+`requiresGatewayRestart` checks explicit restart conditions:
+
+- An OpenCode runtime version change.
+- Added, changed, or removed files under `packages/telegram/src/`.
+- Changes to `install.sh`, `bunfig.toml`, or `packages/telegram/bunfig.toml`.
+- Changes to the gateway's resolved runtime dependencies or module execution settings.
+
+For tracked runtime files, the comparison includes contents, file modes, and symbolic-link targets.
+Other files use the default path, including new directories and file types.
+Plugins, documentation, tests, and development files do not need individual exceptions.
+When gateway code starts using another source directory, add that directory to the explicit restart conditions.
 
 Package and lockfile changes are checked against the gateway's resolved runtime dependency graph.
 The comparison includes transitive dependencies, optional dependencies, installed peer dependencies, nested resolutions, and package integrity values.
 Plugin-only and development-only dependency changes do not require a gateway restart.
 Changes to shared dependencies used by the gateway do require a restart.
-An unsupported lockfile layout uses the normal restart path.
+An invalid or unsupported dependency snapshot fails preparation before activation.
+It does not cause an automatic restart.
 
 No-restart updates require a running gateway, a healthy owned OpenCode service, and the managed `current` link.
+Failed prerequisite checks report an error without switching to the restart path.
 The worker selects the prepared directory and synchronizes the complete plugin set without stopping either service.
 OpenCode's native file watcher loads, reloads, and unloads plugins asynchronously.
 The worker checks service availability, runtime version, and unchanged process IDs before recording the update.

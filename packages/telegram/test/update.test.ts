@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, readlink, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { applyUpdate, command, canUpdateWithoutRestart, releaseVersion } from "../src/update"
+import { applyUpdate, command, requiresGatewayRestart, releaseVersion } from "../src/update"
 
-function steps(fail?: string) {
+function steps(fail?: string, restart = false) {
   const calls: string[] = []
   const step = (name: string) => async () => { calls.push(name); if (name === fail) throw new Error(`${name} failed`) }
-  return { calls, prepare: step("prepare"), stop: step("stop"), activate: step("activate"), start: step("start"), verify: step("verify"), recover: step("recover") }
+  const actions = { activate: step("activate"), verify: step("verify"), recover: step("recover") }
+  return { calls, prepare: step("prepare"), ...actions, restart: { required: () => restart, stop: step("stop"), start: step("start"), ...actions } }
 }
 
 test("update preparation failures leave the running gateway intact", async () => {
@@ -23,41 +24,34 @@ test("an unchanged release does not restart services", async () => {
 
 test("activation and connection failures attempt recovery and remain failures", async () => {
   for (const failure of ["stop", "activate", "start", "verify"]) {
-    const plan = steps(failure)
+    const plan = steps(failure, true)
     await expect(applyUpdate(plan)).rejects.toThrow(`${failure} failed`)
     expect(plan.calls.at(-1)).toBe("recover")
     expect(plan.calls.filter(c => c === "recover")).toHaveLength(1)
   }
-  const plan = steps("verify")
-  await expect(applyUpdate({ ...plan, recover: async () => { throw new Error("service unavailable") } })).rejects.toThrow("Restart also failed: service unavailable")
+  const plan = steps("verify", true)
+  await expect(applyUpdate({ ...plan, restart: { ...plan.restart, recover: async () => { throw new Error("service unavailable") } } })).rejects.toThrow("Update recovery also failed: service unavailable")
 })
 
 test("successful updates require the post-restart connection check", async () => {
-  const plan = steps()
+  const plan = steps(undefined, true)
   expect(await applyUpdate(plan)).toBe(true)
   expect(plan.calls).toEqual(["prepare", "stop", "activate", "start", "verify"])
 })
 
-test("plugin-only updates verify health without calling gateway lifecycle steps", async () => {
+test("updates keep services running by default, including without a restart handler", async () => {
   const plan = steps()
-  expect(await applyUpdate({ ...plan, hot: {
-    enabled: () => true,
-    activate: async () => { plan.calls.push("hot activate") },
-    verify: async () => { plan.calls.push("hot verify") },
-    recover: async () => { plan.calls.push("hot recover") },
-  } })).toBe(true)
-  expect(plan.calls).toEqual(["prepare", "hot activate", "hot verify"])
+  expect(await applyUpdate(plan)).toBe(true)
+  expect(plan.calls).toEqual(["prepare", "activate", "verify"])
+  plan.calls.length = 0
+  expect(await applyUpdate({ ...plan, restart: undefined })).toBe(true)
+  expect(plan.calls).toEqual(["prepare", "activate", "verify"])
 })
 
 test("failed plugin-only updates restore plugin files without restarting services", async () => {
-  const plan = steps()
-  await expect(applyUpdate({ ...plan, hot: {
-    enabled: () => true,
-    activate: async () => { plan.calls.push("hot activate") },
-    verify: async () => { throw new Error("plugin check failed") },
-    recover: async () => { plan.calls.push("hot recover") },
-  } })).rejects.toThrow("plugin check failed")
-  expect(plan.calls).toEqual(["prepare", "hot activate", "hot recover"])
+  const plan = steps("verify")
+  await expect(applyUpdate(plan)).rejects.toThrow("verify failed")
+  expect(plan.calls).toEqual(["prepare", "activate", "verify", "recover"])
 })
 
 test("plugin lifecycle and non-runtime changes keep services running; gateway changes require a restart", async () => {
@@ -70,6 +64,7 @@ test("plugin lifecycle and non-runtime changes keep services running; gateway ch
     "package.json": '{}',
     "packages/telegram/package.json": '{"dependencies":{"api":"^1"}}',
     "install.sh": "installer",
+    "bunfig.toml": "runtime settings",
     "bun.lock": JSON.stringify({ lockfileVersion: 1, workspaces: { "packages/telegram": { name: "gateway", dependencies: { api: "^1" } } }, packages: {
       api: ["api@1.0.0", "", { dependencies: { leaf: "^1" } }, "integrity-api"],
       leaf: ["leaf@1.0.0", "", {}, "integrity-leaf"],
@@ -85,42 +80,62 @@ test("plugin lifecycle and non-runtime changes keep services running; gateway ch
       await command(["git", "init", "--quiet"], root)
       await command(["git", "add", "."], root)
     }
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
     await writeFile(join(next, "tsconfig.json"), '{"compilerOptions":{"strict":false}}')
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
     await writeFile(join(next, "tsconfig.json"), '{"compilerOptions":{"paths":{"gateway":["./different.ts"]}}}')
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(false)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(true)
     await writeFile(join(next, "tsconfig.json"), files["tsconfig.json"]!)
     await writeFile(join(next, "README.md"), "documentation-only update")
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
     await writeFile(join(next, "packages/plugins/context.ts"), "new context")
     await writeFile(join(next, "README.md"), "updated documentation")
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
-    expect(await canUpdateWithoutRestart(current, next, true)).toBe(false)
-    for (const file of ["packages/telegram/src/gateway.ts", "packages/telegram/package.json", "install.sh", "bun.lock"]) {
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
+    expect(await requiresGatewayRestart(current, next, true)).toBe(true)
+    for (const file of ["packages/telegram/src/gateway.ts", "install.sh", "bunfig.toml"]) {
       await writeFile(join(next, file), "changed")
-      expect(await canUpdateWithoutRestart(current, next, false)).toBe(false)
+      expect(await requiresGatewayRestart(current, next, false)).toBe(true)
       await writeFile(join(next, file), files[file]!)
     }
+    await rm(join(next, "packages/telegram/src/gateway.ts"))
+    expect(await requiresGatewayRestart(current, next, false)).toBe(true)
+    await writeFile(join(next, "packages/telegram/src/gateway.ts"), files["packages/telegram/src/gateway.ts"]!)
+    await writeFile(join(next, "packages/telegram/src/new.ts"), "new runtime module")
+    await command(["git", "add", "."], next)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(true)
+    await rm(join(next, "packages/telegram/src/new.ts"))
+    // New, otherwise unclassified files do not require a no-restart exception.
+    await mkdir(join(next, "new-component"))
+    await writeFile(join(next, "new-component/new-format.data"), "new data")
+    await command(["git", "add", "."], next)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
+    await writeFile(join(next, "new-component/new-format.data"), "changed data")
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
+    await rm(join(next, "new-component/new-format.data"))
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
+    // Bad preparation is an error, not an implicit reason to restart services.
+    await writeFile(join(next, "bun.lock"), "invalid lockfile")
+    await expect(requiresGatewayRestart(current, next, false)).rejects.toThrow()
+    await writeFile(join(next, "bun.lock"), files["bun.lock"]!)
     await rm(join(next, "packages/plugins/context.ts"))
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
     await writeFile(join(next, "packages/plugins/other.js"), "new plugin")
     await command(["git", "add", "."], next)
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
     // Plugin/development dependencies can change without changing the gateway's dependency graph.
     await writeFile(join(next, "package.json"), '{"workspaces":["packages/*"],"devDependencies":{"typescript":"new"},"scripts":{"test":"new"}}')
     const lock = JSON.parse(files["bun.lock"]!)
     lock.packages.plugin = ["plugin@2.0.0", "", {}, "integrity-plugin"]
     await writeFile(join(next, "bun.lock"), JSON.stringify(lock))
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(true)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(false)
     lock.packages.leaf[0] = "leaf@1.0.1"
     await writeFile(join(next, "bun.lock"), JSON.stringify(lock))
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(false)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(true)
     // A new nested resolution changes the gateway even when the hoisted package is unchanged.
     lock.packages.leaf[0] = "leaf@1.0.0"
     lock.packages["api/leaf"] = ["leaf@2.0.0", "", {}, "different-integrity"]
     await writeFile(join(next, "bun.lock"), JSON.stringify(lock))
-    expect(await canUpdateWithoutRestart(current, next, false)).toBe(false)
+    expect(await requiresGatewayRestart(current, next, false)).toBe(true)
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 

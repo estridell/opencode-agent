@@ -118,12 +118,15 @@ export async function gatewayDependencies(root: string): Promise<string> {
   return JSON.stringify([manifests, config.extends, transforms, [...graph].sort(([a], [b]) => a.localeCompare(b))])
 }
 
-/** Restart only for files or resolved dependencies used by the installed gateway. */
-export async function canUpdateWithoutRestart(current: string, next: string, runtimeChanged: boolean): Promise<boolean> {
-  if (runtimeChanged) return false
+/** No restart is the default. Only these gateway/installation inputs trigger a restart. */
+const gatewayRestartFiles = new Set(["install.sh", "bunfig.toml", "packages/telegram/bunfig.toml"])
+
+export async function requiresGatewayRestart(current: string, next: string, runtimeChanged: boolean): Promise<boolean> {
+  if (runtimeChanged) return true
   const inventories = await Promise.all([current, next].map(async directory =>
     (await command(["git", "ls-files", "-z"], directory)).split("\0").filter(Boolean)))
   for (const file of new Set(inventories.flat())) {
+    if (!file.startsWith("packages/telegram/src/") && !gatewayRestartFiles.has(file)) continue
     const read = async (root: string) => {
       const path = join(root, file)
       const info = await lstat(path).catch(error => {
@@ -135,13 +138,10 @@ export async function canUpdateWithoutRestart(current: string, next: string, run
       return `${info.mode}:${createHash("sha256").update(bytes).digest("hex")}`
     }
     const [before, after] = await Promise.all([read(current), read(next)])
-    if (before === after) continue
-    if (file.startsWith("packages/plugins/") || /^(docs|config|scripts|\.github)\//.test(file) || file.startsWith("packages/telegram/test/")) continue
-    if (/\.md$/.test(file) || ["package.json", "packages/telegram/package.json", "bun.lock", "tsconfig.json", ".gitignore", "LICENSE"].includes(file)) continue
-    return false
+    if (before !== after) return true
   }
-  try { return await gatewayDependencies(current) === await gatewayDependencies(next) }
-  catch { return false } // Unknown dependency layouts use the normal restart path.
+  // An invalid dependency snapshot fails preparation; it does not request a speculative restart.
+  return await gatewayDependencies(current) !== await gatewayDependencies(next)
 }
 
 export async function selectApplication(directory: string, home = agentHome()) {
@@ -151,33 +151,25 @@ export async function selectApplication(directory: string, home = agentHome()) {
   finally { await rm(temporary, { force: true }) }
 }
 
+type UpdateActions = { activate(): Promise<void>; verify(): Promise<void>; recover(): Promise<void> }
+
 /** Preparation errors leave the running service intact. Recovery never downgrades a migrated runtime database. */
-export async function applyUpdate(steps: {
-  prepare(): Promise<void | false>; stop(): Promise<void>; activate(): Promise<void>
-  start(): Promise<void>; verify(): Promise<void>; recover(): Promise<void>
-  hot?: { enabled(): boolean; activate(): Promise<void>; verify(): Promise<void>; recover(): Promise<void> }
+export async function applyUpdate(steps: UpdateActions & {
+  prepare(): Promise<void | false>
+  restart?: UpdateActions & { required(): boolean; stop(): Promise<void>; start(): Promise<void> }
 }) {
   if (await steps.prepare() === false) return false
-  if (steps.hot?.enabled()) {
-    try {
-      await steps.hot.activate()
-      await steps.hot.verify()
-      return true
-    } catch (error) {
-      try { await steps.hot.recover() }
-      catch (recovery) { throw new Error(`${errorText(error)}\nPlugin recovery also failed: ${errorText(recovery)}`) }
-      throw error
-    }
-  }
+  const restart = steps.restart?.required() ? steps.restart : undefined
+  const actions = restart ?? steps
   try {
-    await steps.stop()
-    await steps.activate()
-    await steps.start()
-    await steps.verify()
+    await restart?.stop()
+    await actions.activate()
+    await restart?.start()
+    await actions.verify()
     return true
   } catch (error) {
-    try { await steps.recover() }
-    catch (recovery) { throw new Error(`${errorText(error)}\nRestart also failed: ${errorText(recovery)}`) }
+    try { await actions.recover() }
+    catch (recovery) { throw new Error(`${errorText(error)}\nUpdate recovery also failed: ${errorText(recovery)}`) }
     throw error
   }
 }
@@ -222,7 +214,7 @@ export async function runUpdate(id: string, messageID?: number) {
   let runtimeChanged = false
   let restartAt = 0
   let stopped = false
-  let hot = false
+  let restartRequired = false
   let gatewayPID = ""
   let runtimePID = 0
   let selected = false
@@ -267,85 +259,85 @@ export async function runUpdate(id: string, messageID?: number) {
         await report("Checking the application.")
         await run([process.execPath, "run", "check"], stage)
         await run([process.execPath, "test"], stage)
-        hot = await canUpdateWithoutRestart(root, stage, runtimeChanged)
-        if (hot) {
-          // Require a managed, healthy gateway before choosing the no-restart path.
+        restartRequired = await requiresGatewayRestart(root, stage, runtimeChanged)
+        if (!restartRequired) {
           const currentPath = await realpath(join(agentHome(), "current")).catch(() => "")
           gatewayPID = await command(["systemctl", "--user", "show", unitName, "--property=MainPID", "--value"])
           const endpoint = await Service.discover({ file: registrationFile() })
-          hot = currentPath === await realpath(root) && Number(gatewayPID) > 0 && !!endpoint
-          if (hot) runtimePID = (await Bun.file(registrationFile()).json()).pid
+          if (currentPath !== await realpath(root)) throw new Error("Run the update from the selected application.")
+          if (Number(gatewayPID) <= 0 || !endpoint) throw new Error("The gateway and OpenCode must be running for a live update.")
+          runtimePID = (await Bun.file(registrationFile()).json()).pid
         }
         if (runtimeChanged) {
           await report(`Downloading OpenCode V2 ${version}.`)
           binary = await downloadRuntime(version, join(stage, ".runtime"))
         }
       },
-      stop: async () => {
-        await report(runtimeChanged ? "Restarting the gateway and OpenCode. Active tasks can be interrupted." : "Restarting the Telegram gateway.")
-        stopped = true
-        await run(["systemctl", "--user", "stop", unitName])
-        // Also wait for the child to release the gateway lock before touching files.
-        await run(["flock", "--wait", "20", join(agentHome(), "gateway.lock"), "true"])
-        if (runtimeChanged) {
-          await Service.stop({ file: registrationFile() })
-          await copyFile(upstreamBinary(), join(stage, "opencode.previous"))
-          await copyFile(binary, `${upstreamBinary()}.next`)
-          await rename(`${upstreamBinary()}.next`, upstreamBinary())
-        }
-      },
       activate: async () => {
-        // The current installer updates the stable launcher, Bun, and dependencies.
-        await run(["bash", join(stage, "install.sh"), "--source", stage, "--no-setup"])
-        await run([join(agentHome(), "tools/bun/bin/bun"), join(stage, "packages/telegram/src/main.ts"), "gateway", "_install"])
-      },
-      start: async () => {
-        restartAt = Date.now()
-        await run(["systemctl", "--user", "start", unitName])
+        await report("Applying updates. Telegram and OpenCode remain running.")
+        await selectApplication(stage)
+        selected = true
+        await installPlugins(runtimeEnv().XDG_CONFIG_HOME!, stage)
       },
       verify: async () => {
-        await report("Waiting for the gateway to connect.")
-        const deadline = Date.now() + 60_000
-        while (Date.now() < deadline) {
-          const ready = await Bun.file(join(agentHome(), "gateway-ready.json")).json().catch(() => undefined)
-          if (ready?.time >= restartAt && ready.version === version && resolve(ready.source) === resolve(stage)) {
-            await saveInstalled()
-            return
-          }
-          await sleep(1000)
+        const endpoint = await Service.discover({ file: registrationFile() })
+        if (!endpoint) throw new Error("The separate OpenCode service is unavailable.")
+        const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
+        const info = await client.server.info({ signal: AbortSignal.timeout(15_000) })
+        const pid = await command(["systemctl", "--user", "show", unitName, "--property=MainPID", "--value"])
+        if (pid !== gatewayPID || (await Bun.file(registrationFile()).json()).pid !== runtimePID || info.version !== version) {
+          throw new Error("A service changed during the live update.")
         }
-        throw new Error("The gateway did not connect within 60 seconds. Run opencode-agent gateway logs.")
+        await saveInstalled()
       },
       recover: async () => {
-        if (stopped) await run(["systemctl", "--user", "restart", unitName])
+        if (!selected) return
+        await selectApplication(root)
+        await installPlugins(runtimeEnv().XDG_CONFIG_HOME!, root)
       },
-      hot: {
-        enabled: () => hot,
+      restart: {
+        required: () => restartRequired,
+        stop: async () => {
+          await report(runtimeChanged ? "Restarting the gateway and OpenCode. Active tasks can be interrupted." : "Restarting the Telegram gateway.")
+          stopped = true
+          await run(["systemctl", "--user", "stop", unitName])
+          // Also wait for the child to release the gateway lock before touching files.
+          await run(["flock", "--wait", "20", join(agentHome(), "gateway.lock"), "true"])
+          if (runtimeChanged) {
+            await Service.stop({ file: registrationFile() })
+            await copyFile(upstreamBinary(), join(stage, "opencode.previous"))
+            await copyFile(binary, `${upstreamBinary()}.next`)
+            await rename(`${upstreamBinary()}.next`, upstreamBinary())
+          }
+        },
         activate: async () => {
-          await report("Applying updates. Telegram and OpenCode remain running.")
-          await selectApplication(stage)
-          selected = true
-          await installPlugins(runtimeEnv().XDG_CONFIG_HOME!, stage)
+          // The current installer updates the stable launcher, Bun, and dependencies.
+          await run(["bash", join(stage, "install.sh"), "--source", stage, "--no-setup"])
+          await run([join(agentHome(), "tools/bun/bin/bun"), join(stage, "packages/telegram/src/main.ts"), "gateway", "_install"])
+        },
+        start: async () => {
+          restartAt = Date.now()
+          await run(["systemctl", "--user", "start", unitName])
         },
         verify: async () => {
-          const endpoint = await Service.discover({ file: registrationFile() })
-          if (!endpoint) throw new Error("The separate OpenCode service is unavailable.")
-          const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
-          const info = await client.server.info({ signal: AbortSignal.timeout(15_000) })
-          const pid = await command(["systemctl", "--user", "show", unitName, "--property=MainPID", "--value"])
-          if (pid !== gatewayPID || (await Bun.file(registrationFile()).json()).pid !== runtimePID || info.version !== version) {
-            throw new Error("A service changed during the plugin update.")
+          await report("Waiting for the gateway to connect.")
+          const deadline = Date.now() + 60_000
+          while (Date.now() < deadline) {
+            const ready = await Bun.file(join(agentHome(), "gateway-ready.json")).json().catch(() => undefined)
+            if (ready?.time >= restartAt && ready.version === version && resolve(ready.source) === resolve(stage)) {
+              await saveInstalled()
+              return
+            }
+            await sleep(1000)
           }
-          await saveInstalled()
+          throw new Error("The gateway did not connect within 60 seconds. Run opencode-agent gateway logs.")
         },
         recover: async () => {
-          if (!selected) return
-          await selectApplication(root)
-          await installPlugins(runtimeEnv().XDG_CONFIG_HOME!, root)
+          if (stopped) await run(["systemctl", "--user", "restart", unitName])
         },
       },
     })
-    await report(changed ? `Update complete.\nApplication: ${commit}\nOpenCode: ${version}\n${hot ? "Services kept running." : "Telegram connected."}` : `Already up to date.\nApplication: ${commit}\nOpenCode: ${version}`, "done")
+    await report(changed ? `Update complete.\nApplication: ${commit}\nOpenCode: ${version}\n${restartRequired ? "Telegram connected." : "Services kept running."}` : `Already up to date.\nApplication: ${commit}\nOpenCode: ${version}`, "done")
   } catch (error) {
     await report(`Update failed.\n${errorText(error, [config.token])}\nLog: ${log}`, "failed")
     process.exitCode = 1
